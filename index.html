@@ -98,8 +98,161 @@
     </div>
 
     <script>
-        // --- Step 2: JavaScript Code ---
-        // আমরা পরবর্তী ধাপে এখানে কানেকশনের লজিক বসাবো
+        // UI Elements
+        const setupScreen = document.getElementById('setup-screen');
+        const chatScreen = document.getElementById('chat-screen');
+        const errorScreen = document.getElementById('error-screen');
+        const linkContainer = document.getElementById('link-container');
+        const shareLink = document.getElementById('share-link');
+        const chatBox = document.getElementById('chat-box');
+        const messageInput = document.getElementById('message-input');
+
+        let peer = null;
+        let conn = null;
+        let chatHistory = [];
+        let roomKey = "SecureKey"; // Encryption Key
+
+        // স্ক্রিন পরিবর্তন করার ফাংশন
+        function showScreen(screenId) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(screenId).classList.add('active');
+        }
+
+        // Host (যে লিংক তৈরি করবে)
+        document.getElementById('create-btn').addEventListener('click', () => {
+            document.getElementById('create-btn').innerText = "Creating...";
+            peer = new Peer(); // ফ্রি সার্ভারের মাধ্যমে কানেকশন তৈরি
+            
+            peer.on('open', (id) => {
+                roomKey = id; // চ্যাট হিস্ট্রি এনক্রিপ্ট করার জন্য আইডিকে পাসওয়ার্ড হিসেবে ব্যবহার
+                const url = window.location.origin + window.location.pathname + '#' + id;
+                shareLink.innerText = url;
+                linkContainer.style.display = 'block';
+                document.getElementById('create-btn').style.display = 'none';
+            });
+
+            peer.on('connection', (connection) => {
+                // ৩য় ব্যক্তিকে ব্লক করার লজিক
+                if (conn) {
+                    connection.on('open', () => {
+                        connection.send({ type: 'REJECT' });
+                        setTimeout(() => connection.close(), 500);
+                    });
+                    return;
+                }
+                conn = connection;
+                setupChat();
+            });
+        });
+
+        // লিংক কপি করার বাটন
+        document.getElementById('copy-btn').addEventListener('click', () => {
+            navigator.clipboard.writeText(shareLink.innerText);
+            alert('লিংক কপি হয়েছে! যার সাথে কথা বলবেন তাকে পাঠিয়ে দিন।');
+        });
+
+        // Guest (যে লিংকে প্রবেশ করবে)
+        window.onload = () => {
+            const hash = window.location.hash;
+            if (hash) {
+                const hostId = hash.substring(1);
+                roomKey = hostId;
+                peer = new Peer();
+                
+                peer.on('open', () => {
+                    conn = peer.connect(hostId);
+                    setupChat();
+                });
+            }
+        };
+
+        // চ্যাট সেটআপ ও মেসেজ আদান-প্রদান
+        function setupChat() {
+            conn.on('open', () => {
+                showScreen('chat-screen');
+                loadHistory(); // লোকাল স্টোরেজ থেকে পুরনো মেসেজ লোড
+            });
+
+            conn.on('data', (data) => {
+                // যদি ৩য় ব্যক্তি হয়, তবে ব্লক মেসেজ দেখাবে
+                if (data.type === 'REJECT') {
+                    showScreen('error-screen');
+                    return;
+                }
+                if (data.type === 'MSG') {
+                    displayMessage(data.text, 'peer');
+                    saveToHistory(data.text, 'peer');
+                }
+            });
+
+            conn.on('close', () => {
+                alert("কানেকশন বিচ্ছিন্ন হয়েছে!");
+                location.reload();
+            });
+        }
+
+        // মেসেজ পাঠানোর ফাংশন
+        document.getElementById('send-btn').addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        function sendMessage() {
+            const text = messageInput.value.trim();
+            if (text && conn && conn.open) {
+                conn.send({ type: 'MSG', text: text });
+                displayMessage(text, 'me');
+                saveToHistory(text, 'me');
+                messageInput.value = '';
+            }
+        }
+
+        // স্ক্রিনে মেসেজ দেখানো
+        function displayMessage(text, sender) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${sender}`;
+            msgDiv.innerText = text;
+            chatBox.appendChild(msgDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // হাই-সিকিউরিটি: CryptoJS দিয়ে মেসেজ এনক্রিপ্ট করে ব্রাউজারে সেভ করা
+        function saveToHistory(text, sender) {
+            chatHistory.push({ text, sender });
+            const encryptedData = CryptoJS.AES.encrypt(JSON.stringify(chatHistory), roomKey).toString();
+            localStorage.setItem(`secure_chat_${roomKey}`, encryptedData);
+        }
+
+        function loadHistory() {
+            const encryptedData = localStorage.getItem(`secure_chat_${roomKey}`);
+            if (encryptedData) {
+                try {
+                    const bytes = CryptoJS.AES.decrypt(encryptedData, roomKey);
+                    const decryptedText = bytes.toString(CryptoJS.enc.Utf8);
+                    if (decryptedText) {
+                        chatHistory = JSON.parse(decryptedText);
+                        chatHistory.forEach(msg => displayMessage(msg.text, msg.sender));
+                    }
+                } catch (e) {
+                    console.error("ডেটা ডিক্রিপ্ট করতে সমস্যা হয়েছে!");
+                }
+            }
+        }
+
+        // চ্যাট হিস্ট্রি ডিলিট করা
+        document.getElementById('clear-chat-btn').addEventListener('click', () => {
+            if(confirm("আপনি কি আপনার ফোন থেকে এই চ্যাটের সব রেকর্ড চিরতরে মুছে ফেলতে চান?")) {
+                localStorage.removeItem(`secure_chat_${roomKey}`);
+                chatBox.innerHTML = '<div style="text-align: center; color: #64748b; font-size: 12px; margin-bottom: 15px;"><i class="fa-solid fa-lock"></i> Messages are End-to-End Encrypted.</div>';
+                chatHistory = [];
+            }
+        });
+
+        // অডিও কল (পরবর্তী ধাপের জন্য)
+        document.getElementById('audio-call-btn').addEventListener('click', () => {
+            alert("অডিও কলিং ফিচারটি আমরা এর পরের ধাপে যুক্ত করব!");
+        });
     </script>
+
 </body>
 </html>
