@@ -4,11 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Secure Chat</title>
-
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-
+    
     <style>
         :root {
             --bg-color: #0f172a; --text-color: #f8fafc;
@@ -31,7 +30,6 @@
         .status { font-size: 14px; font-weight: bold; color: #fbbf24; }
         .header-actions button { background: none; border: none; color: white; font-size: 20px; margin-left: 15px; cursor: pointer; }
         
-        /* লিংক দেখানোর বক্স (চ্যাটের ভেতরে) */
         #waiting-link-box { background: #334155; padding: 15px; margin: 15px; border-radius: 8px; border: 1px dashed var(--primary); display: none; }
         #waiting-link-box p { word-break: break-all; color: var(--primary); font-size: 14px; margin-bottom: 10px; font-weight: bold; }
 
@@ -100,55 +98,54 @@
             document.getElementById(screenId).classList.add('active');
         }
 
-        // Host: লিংক তৈরি করার লজিক
-        document.getElementById('create-btn').addEventListener('click', () => {
-            document.getElementById('create-btn').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Creating...';
-            peer = new Peer(); 
+        // 1. লিংকে ID আছে কিনা তা চেক করা (Guest Mode)
+        const urlParams = new URLSearchParams(window.location.search);
+        const roomId = urlParams.get('room');
+
+        if (roomId) {
+            // যদি লিংকে ID থাকে, তার মানে সে ২য় ব্যক্তি
+            roomKey = roomId;
+            showScreen('chat-screen');
+            document.getElementById('chat-status').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Connecting...';
+            document.getElementById('waiting-link-box').style.display = 'none';
             
-            peer.on('open', (id) => {
-                roomKey = id; 
-                const url = window.location.origin + window.location.pathname + '#' + id;
-                
-                // সাথে সাথে চ্যাট রুম ওপেন হবে
-                showScreen('chat-screen');
-                document.getElementById('share-link').innerText = url;
-                document.getElementById('waiting-link-box').style.display = 'block';
-            });
-
-            // দ্বিতীয় ব্যক্তি জয়েন করলে
-            peer.on('connection', (connection) => {
-                // ৩য় ব্যক্তিকে ব্লক করা
-                if (conn) {
-                    connection.on('open', () => {
-                        connection.send({ type: 'REJECT' });
-                        setTimeout(() => connection.close(), 500);
-                    });
-                    return;
-                }
-                conn = connection;
-                setupChat();
-            });
-        });
-
-        // Guest: লিংকে প্রবেশ করার লজিক
-        window.onload = () => {
-            const hash = window.location.hash;
-            if (hash) {
-                const hostId = hash.substring(1);
-                roomKey = hostId;
-                
-                showScreen('chat-screen');
-                document.getElementById('chat-status').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Connecting...';
-                
-                peer = new Peer();
-                peer.on('open', () => {
-                    conn = peer.connect(hostId);
-                    conn.on('open', () => {
-                        setupChat();
-                    });
+            peer = new Peer();
+            peer.on('open', () => {
+                conn = peer.connect(roomId);
+                conn.on('open', () => {
+                    setupChat();
                 });
-            }
-        };
+            });
+        } else {
+            // 2. যদি লিংকে ID না থাকে, তার মানে সে ১ম ব্যক্তি (Host Mode)
+            document.getElementById('create-btn').addEventListener('click', () => {
+                document.getElementById('create-btn').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Creating...';
+                peer = new Peer(); 
+                
+                peer.on('open', (id) => {
+                    roomKey = id; 
+                    // এখানে আমরা # এর বদলে ?room= ব্যবহার করেছি
+                    const url = window.location.origin + window.location.pathname + '?room=' + id;
+                    
+                    showScreen('chat-screen');
+                    document.getElementById('share-link').innerText = url;
+                    document.getElementById('waiting-link-box').style.display = 'block';
+                });
+
+                peer.on('connection', (connection) => {
+                    // ৩য় ব্যক্তিকে ব্লক করা
+                    if (conn) {
+                        connection.on('open', () => {
+                            connection.send({ type: 'REJECT' });
+                            setTimeout(() => connection.close(), 500);
+                        });
+                        return;
+                    }
+                    conn = connection;
+                    setupChat();
+                });
+            });
+        }
 
         // লিংক কপি বাটন
         document.getElementById('copy-btn').addEventListener('click', () => {
