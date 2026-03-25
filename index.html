@@ -2,46 +2,59 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Secure P2P Chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Secure P2P Chat & Call</title>
     
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
     <div id="setup-screen" class="screen">
-        <i class="fa-solid fa-user-secret" style="font-size: 50px; color: var(--primary); margin-bottom: 20px;"></i>
-        <h2>Secure P2P Chat</h2>
-        <p class="subtitle">100% End-to-End Encrypted. Max 2 Users.</p>
-        <button id="create-btn" class="btn"><i class="fa-solid fa-plus"></i> Create Secure Room</button>
+        <i class="fa-solid fa-user-secret" style="font-size: 60px; color: var(--primary); margin-bottom: 20px;"></i>
+        <h2>Secure Comm</h2>
+        <p class="subtitle">E2E Encrypted Chat, Voice & Video Call</p>
+        <button id="create-btn" class="btn"><i class="fa-solid fa-shield-halved"></i> Create Secure Room</button>
+        <div class="copyright">Copyright Owner : Muhammad Shourov</div>
     </div>
 
     <div id="chat-screen" class="screen">
         <div class="header">
             <div id="chat-status" class="status"><i class="fa-solid fa-spinner fa-spin"></i> Connecting...</div>
             <div class="header-actions">
-                <button id="call-btn" title="Audio Call (Coming Soon)"><i class="fa-solid fa-phone"></i></button>
-                <button id="close-room-btn" title="Close & Destroy Room"><i class="fa-solid fa-right-from-bracket"></i></button>
+                <button id="audio-call-btn" title="Voice Call" disabled><i class="fa-solid fa-phone"></i></button>
+                <button id="video-call-btn" title="Video Call" disabled><i class="fa-solid fa-video"></i></button>
+                <button id="close-room-btn" title="Destroy Room"><i class="fa-solid fa-right-from-bracket"></i></button>
+            </div>
+        </div>
+
+        <div id="video-container" class="video-container">
+            <video id="remote-video" autoplay playsinline></video>
+            <video id="local-video" autoplay playsinline muted></video>
+            <div class="call-controls">
+                <button id="end-call-btn" class="btn danger-btn"><i class="fa-solid fa-phone-slash"></i> End Call</button>
             </div>
         </div>
 
         <div id="waiting-link-box">
-            <div class="link-title">Share this link with 1 person only:</div>
+            <div class="link-title">Share this link with your partner:</div>
             <p id="share-link"></p>
             <button id="copy-btn" class="btn small-btn"><i class="fa-solid fa-copy"></i> Copy Link</button>
         </div>
         
         <div class="chat-box" id="chat-box">
             <div class="encryption-notice">
-                <i class="fa-solid fa-lock"></i> Connection is fully encrypted.
+                <i class="fa-solid fa-lock"></i> All messages and calls are E2E Encrypted.
             </div>
         </div>
         
+        <div id="typing-indicator" class="typing-indicator">Peer is typing...</div>
+
         <div class="input-area">
+            <input type="file" id="file-input" style="display: none;" accept="image/*,.pdf,.doc,.txt">
+            <button id="attach-btn" class="attach-btn" disabled><i class="fa-solid fa-paperclip"></i></button>
             <input type="text" id="message-input" placeholder="Type a message..." disabled>
             <button id="send-btn" class="send-btn" disabled><i class="fa-solid fa-paper-plane"></i></button>
         </div>
@@ -49,8 +62,8 @@
 
     <div id="error-screen" class="screen">
         <i class="fa-solid fa-circle-exclamation" style="font-size: 50px; color: var(--danger);"></i>
-        <h2>Room Full / Denied</h2>
-        <p class="subtitle">This room is either full (max 2 users) or the link is invalid.</p>
+        <h2>Access Denied</h2>
+        <p class="subtitle">The room is full or the link is invalid.</p>
         <button onclick="window.location.href='?'" class="btn" style="margin-top: 20px;">Go Home</button>
     </div>
 
