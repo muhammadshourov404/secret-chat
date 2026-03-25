@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Chat</title>
+
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        /* ওয়েবসাইটের কালার ও ডিজাইন */
+        :root {
+            --bg-color: #0f172a;
+            --text-color: #f8fafc;
+            --primary: #10b981;
+            --primary-hover: #059669;
+            --danger: #ef4444;
+            --chat-bg: #1e293b;
+            --message-me: #10b981;
+            --message-peer: #334155;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-color); height: 100vh; display: flex; flex-direction: column; }
+
+        /* স্ক্রিন কন্ট্রোল (কোনটা কখন দেখাবে) */
+        .screen { display: none; flex-direction: column; height: 100%; padding: 20px; align-items: center; justify-content: center; text-align: center; }
+        .screen.active { display: flex; }
+
+        /* প্রথম স্ক্রিন (লিংক তৈরির পেজ) */
+        .btn { background-color: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 20px; transition: 0.3s; width: 100%; max-width: 300px; }
+        .btn:hover { background-color: var(--primary-hover); }
+        .link-box { margin-top: 20px; padding: 15px; background: var(--chat-bg); border-radius: 8px; word-break: break-all; font-size: 14px; width: 100%; max-width: 400px; display: none; border: 1px solid var(--primary); }
+        
+        /* দ্বিতীয় স্ক্রিন (চ্যাট রুম) */
+        #chat-screen { padding: 0; justify-content: space-between; }
+        .header { background: var(--chat-bg); width: 100%; padding: 15px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+        .status { font-size: 14px; color: var(--primary); font-weight: bold; display: flex; align-items: center; gap: 5px; }
+        .status i { font-size: 10px; }
+        .header-actions button { background: none; border: none; color: white; font-size: 20px; margin-left: 15px; cursor: pointer; }
+        
+        .chat-box { flex: 1; width: 100%; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+        .message { max-width: 75%; padding: 10px 15px; border-radius: 15px; font-size: 15px; line-height: 1.4; word-wrap: break-word; }
+        .message.me { background-color: var(--message-me); align-self: flex-end; border-bottom-right-radius: 2px; }
+        .message.peer { background-color: var(--message-peer); align-self: flex-start; border-bottom-left-radius: 2px; }
+        
+        .input-area { width: 100%; padding: 15px; background: var(--chat-bg); display: flex; gap: 10px; align-items: center; }
+        .input-area input { flex: 1; padding: 12px 15px; border-radius: 25px; border: none; background: #0f172a; color: white; outline: none; font-size: 15px; }
+        .send-btn { background: var(--primary); color: white; border: none; width: 45px; height: 45px; border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; font-size: 18px; }
+
+        /* তৃতীয় স্ক্রিন (ব্লক/এরর পেজ) */
+        #error-screen h2 { color: var(--danger); }
+        #error-screen p { margin-top: 10px; color: #94a3b8; }
+    </style>
+</head>
+<body>
+
+    <div id="setup-screen" class="screen active">
+        <i class="fa-solid fa-shield-halved" style="font-size: 50px; color: var(--primary); margin-bottom: 20px;"></i>
+        <h2>Secure P2P Chat</h2>
+        <p style="color: #94a3b8; margin-top: 10px; font-size: 14px;">End-to-End Encrypted. No Database.</p>
+        
+        <button id="create-btn" class="btn">Create Secure Link</button>
+        <div id="link-container" class="link-box">
+            <p id="share-link" style="color: #10b981; font-weight: bold; margin-bottom: 10px;"></p>
+            <button id="copy-btn" class="btn" style="margin-top: 5px; padding: 8px; background: #334155;">Copy Link</button>
+            <p style="margin-top: 15px; font-size: 12px; color: #94a3b8;">এই লিংকটি শুধুমাত্র একজনের সাথে শেয়ার করুন। তার যুক্ত হওয়ার অপেক্ষায়...</p>
+        </div>
+    </div>
+
+    <div id="chat-screen" class="screen">
+        <div class="header">
+            <div class="status"><i class="fa-solid fa-circle"></i> Connected</div>
+            <div class="header-actions">
+                <button id="clear-chat-btn" title="Delete Local History"><i class="fa-solid fa-trash-can"></i></button>
+                <button id="audio-call-btn" title="Audio Call"><i class="fa-solid fa-phone"></i></button>
+            </div>
+        </div>
+        
+        <div class="chat-box" id="chat-box">
+            <div style="text-align: center; color: #64748b; font-size: 12px; margin-bottom: 15px;">
+                <i class="fa-solid fa-lock"></i> Messages are End-to-End Encrypted.
+            </div>
+        </div>
+        
+        <div class="input-area">
+            <input type="text" id="message-input" placeholder="Type a message...">
+            <button id="send-btn" class="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
+        </div>
+    </div>
+
+    <div id="error-screen" class="screen">
+        <i class="fa-solid fa-user-shield" style="font-size: 50px; color: var(--danger); margin-bottom: 20px;"></i>
+        <h2>Site Not Reachable</h2>
+        <p>এই চ্যাট রুমটি ব্লক করা হয়েছে অথবা লিংকটি ভুল। এখানে সর্বোচ্চ ২ জন যুক্ত থাকতে পারে।</p>
+    </div>
+
+    <script>
+        // --- Step 2: JavaScript Code ---
+        // আমরা পরবর্তী ধাপে এখানে কানেকশনের লজিক বসাবো
+    </script>
+</body>
+</html>
