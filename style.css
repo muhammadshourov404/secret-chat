@@ -1,148 +1,60 @@
+/* Copyright Owner : Muhammad Shourov */
 :root {
-    --bg-color: #0f172a; 
-    --text-color: #f8fafc;
-    --primary: #10b981; 
-    --primary-hover: #059669;
-    --danger: #ef4444; 
-    --chat-bg: #1e293b;
-    --message-me: #10b981; 
-    --message-peer: #334155;
+    --bg-color: #0f172a; --text-color: #f8fafc;
+    --primary: #10b981; --primary-hover: #059669;
+    --danger: #ef4444; --chat-bg: #1e293b;
+    --message-me: #10b981; --message-peer: #334155;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }
+body { background-color: var(--bg-color); color: var(--text-color); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
-body { 
-    background-color: var(--bg-color); 
-    color: var(--text-color); 
-    height: 100vh; 
-    display: flex; 
-    flex-direction: column; 
-}
-
-.screen { 
-    display: none; 
-    flex-direction: column; 
-    height: 100%; 
-    padding: 20px; 
-    align-items: center; 
-    justify-content: center; 
-    text-align: center; 
-}
-
+.screen { display: none; flex-direction: column; height: 100%; width: 100%; align-items: center; justify-content: center; text-align: center; }
 .screen.active { display: flex; }
-
 .subtitle { color: #94a3b8; margin-top: 10px; font-size: 14px; }
+.copyright { position: absolute; bottom: 20px; font-size: 12px; color: #64748b; font-weight: bold; letter-spacing: 1px; }
 
-.btn { 
-    background-color: var(--primary); 
-    color: white; 
-    border: none; 
-    padding: 12px 24px; 
-    border-radius: 8px; 
-    font-size: 16px; 
-    font-weight: bold; 
-    cursor: pointer; 
-    transition: 0.3s; 
-    width: 100%; 
-    max-width: 300px; 
-    margin-top: 20px;
-}
+.btn { background-color: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; width: 100%; max-width: 300px; margin-top: 20px; display: flex; justify-content: center; gap: 10px; align-items: center; }
 .btn:hover { background-color: var(--primary-hover); }
-.small-btn { padding: 8px 15px; font-size: 14px; margin-top: 10px; }
+.small-btn { padding: 8px 15px; font-size: 14px; margin-top: 10px; max-width: 150px; }
+.danger-btn { background-color: var(--danger); margin-top: 10px;}
 
-#chat-screen { padding: 0; justify-content: space-between; }
-
-.header { 
-    background: var(--chat-bg); 
-    width: 100%; 
-    padding: 15px 20px; 
-    display: flex; 
-    justify-content: space-between; 
-    align-items: center; 
-    border-bottom: 1px solid #334155; 
-}
+#chat-screen { padding: 0; justify-content: space-between; position: relative; }
+.header { background: var(--chat-bg); width: 100%; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; z-index: 10; }
 .status { font-size: 14px; font-weight: bold; display: flex; align-items: center; gap: 8px; }
 .status.waiting { color: #fbbf24; }
 .status.connected { color: #10b981; }
 .status.disconnected { color: #ef4444; }
 
-.header-actions button { 
-    background: none; 
-    border: none; 
-    color: #f8fafc; 
-    font-size: 20px; 
-    margin-left: 20px; 
-    cursor: pointer; 
-    transition: color 0.2s;
-}
-.header-actions button:hover { color: var(--primary); }
+.header-actions button { background: none; border: none; color: #f8fafc; font-size: 18px; margin-left: 15px; cursor: pointer; transition: 0.2s; }
+.header-actions button:disabled { color: #475569; cursor: not-allowed; }
+.header-actions button:not(:disabled):hover { color: var(--primary); }
 #close-room-btn:hover { color: var(--danger); }
 
-#waiting-link-box { 
-    background: #0f172a; 
-    padding: 15px; 
-    margin: 15px; 
-    border-radius: 8px; 
-    border: 1px solid #334155; 
-    display: none; 
-}
-.link-title { font-size: 12px; color: #94a3b8; margin-bottom: 8px; }
-#share-link { word-break: break-all; color: var(--primary); font-size: 15px; font-weight: bold; }
+/* Video Call Styles */
+.video-container { display: none; width: 100%; height: 40vh; background: #000; position: relative; border-bottom: 2px solid var(--primary); }
+#remote-video { width: 100%; height: 100%; object-fit: cover; }
+#local-video { position: absolute; bottom: 15px; right: 15px; width: 100px; height: 140px; background: #222; border-radius: 8px; border: 2px solid white; object-fit: cover; }
+.call-controls { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); }
 
-.chat-box { 
-    flex: 1; 
-    width: 100%; 
-    padding: 20px; 
-    overflow-y: auto; 
-    display: flex; 
-    flex-direction: column; 
-    gap: 12px; 
-}
+#waiting-link-box { background: #0f172a; padding: 15px; margin: 15px; border-radius: 8px; border: 1px solid #334155; display: none; width: 90%; align-self: center; }
+.link-title { font-size: 12px; color: #94a3b8; margin-bottom: 8px; }
+#share-link { word-break: break-all; color: var(--primary); font-size: 14px; font-weight: bold; }
+
+.chat-box { flex: 1; width: 100%; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth; }
 .encryption-notice { text-align: center; color: #64748b; font-size: 12px; margin-bottom: 15px; }
 
-.message { 
-    max-width: 80%; 
-    padding: 10px 15px; 
-    border-radius: 15px; 
-    font-size: 15px; 
-    line-height: 1.4; 
-    word-wrap: break-word; 
-}
-.message.me { background-color: var(--message-me); align-self: flex-end; border-bottom-right-radius: 2px; color: white;}
+.message { max-width: 80%; padding: 10px 15px; border-radius: 15px; font-size: 15px; line-height: 1.4; word-wrap: break-word; position: relative; }
+.message.me { background-color: var(--message-me); align-self: flex-end; border-bottom-right-radius: 2px; color: white; }
 .message.peer { background-color: var(--message-peer); align-self: flex-start; border-bottom-left-radius: 2px; }
+.message img { max-width: 100%; border-radius: 8px; margin-top: 5px; }
 
-.input-area { 
-    width: 100%; 
-    padding: 15px; 
-    background: var(--chat-bg); 
-    display: flex; 
-    gap: 10px; 
-    align-items: center; 
-}
-.input-area input { 
-    flex: 1; 
-    padding: 12px 15px; 
-    border-radius: 25px; 
-    border: 1px solid #334155; 
-    background: #0f172a; 
-    color: white; 
-    outline: none; 
-    font-size: 15px; 
-}
-.input-area input:focus { border-color: var(--primary); }
-.send-btn { 
-    background: var(--primary); 
-    color: white; 
-    border: none; 
-    width: 45px; 
-    height: 45px; 
-    border-radius: 50%; 
-    display: flex; 
-    justify-content: center; 
-    align-items: center; 
-    cursor: pointer; 
-    font-size: 18px; 
-    transition: 0.2s;
-}
+.typing-indicator { font-size: 12px; color: var(--primary); padding: 0 20px 10px; align-self: flex-start; display: none; font-style: italic; }
+
+.input-area { width: 100%; padding: 15px; background: var(--chat-bg); display: flex; gap: 10px; align-items: center; z-index: 10; }
+.attach-btn { background: none; border: none; color: #94a3b8; font-size: 20px; cursor: pointer; transition: 0.2s; }
+.attach-btn:not(:disabled):hover { color: white; }
+.input-area input[type="text"] { flex: 1; padding: 12px 15px; border-radius: 25px; border: 1px solid #334155; background: #0f172a; color: white; outline: none; font-size: 15px; }
+.send-btn { background: var(--primary); color: white; border: none; width: 45px; height: 45px; border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; font-size: 18px; transition: 0.2s; }
 .send-btn:disabled { background: #334155; cursor: not-allowed; }
 .send-btn:not(:disabled):hover { background: var(--primary-hover); transform: scale(1.05); }
