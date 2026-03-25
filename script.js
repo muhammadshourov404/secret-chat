@@ -1,4 +1,5 @@
 // Copyright Owner : Muhammad Shourov
+
 // DOM Elements
 const screens = { setup: document.getElementById('setup-screen'), chat: document.getElementById('chat-screen'), error: document.getElementById('error-screen') };
 const statusDiv = document.getElementById('chat-status');
@@ -7,7 +8,6 @@ const chatBox = document.getElementById('chat-box'), msgInput = document.getElem
 const attachBtn = document.getElementById('attach-btn'), fileInput = document.getElementById('file-input');
 const typingInd = document.getElementById('typing-indicator');
 
-// Media Elements
 const audioCallBtn = document.getElementById('audio-call-btn'), videoCallBtn = document.getElementById('video-call-btn');
 const videoContainer = document.getElementById('video-container'), localVideo = document.getElementById('local-video'), remoteVideo = document.getElementById('remote-video');
 const endCallBtn = document.getElementById('end-call-btn');
@@ -20,11 +20,12 @@ let typingTimeout = null;
 // Routing Logic
 const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room');
+const isGuestParam = urlParams.get('guest'); // নতুন: গেস্ট চেক করার জন্য
 
 function showScreen(screen) { Object.values(screens).forEach(s => s.classList.remove('active')); screen.classList.add('active'); }
 function updateStatus(text, type, icon) { statusDiv.className = `status ${type}`; statusDiv.innerHTML = `<i class="fa-solid ${icon}"></i> ${text}`; }
 
-// Sound Notification API
+// Sound Notification
 function playBeep() {
     try {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -33,38 +34,56 @@ function playBeep() {
         const osc = ctx.createOscillator();
         const gainNode = ctx.createGain();
         osc.type = 'sine'; osc.frequency.setValueAtTime(800, ctx.currentTime);
-        gainNode.gain.setValueAtTime(0.1, ctx.currentTime); // Low volume
+        gainNode.gain.setValueAtTime(0.1, ctx.currentTime); 
         osc.connect(gainNode); gainNode.connect(ctx.destination);
         osc.start(); osc.stop(ctx.currentTime + 0.15);
-    } catch(e) { console.log("Sound error ignored."); }
+    } catch(e) {}
 }
 
 // ---------------- Initialization ----------------
 if (roomId) {
     showScreen(screens.chat);
-    if (localStorage.getItem(`host_${roomId}`) === 'true') isHost = true;
+    // যদি একই ব্রাউজারেও টেস্ট করা হয়, লিংকে guest=true থাকলে সে হোস্ট হবে না
+    if (localStorage.getItem(`host_${roomId}`) === 'true' && !isGuestParam) {
+        isHost = true;
+    } else {
+        isHost = false;
+    }
     initWebRTC();
 } else { showScreen(screens.setup); }
 
 document.getElementById('create-btn').addEventListener('click', () => {
-    const newRoomId = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 6);
+    const newRoomId = Math.random().toString(36).substring(2, 10);
     localStorage.setItem(`host_${newRoomId}`, 'true');
     window.location.href = '?room=' + newRoomId;
 });
 
 // ---------------- WebRTC Setup ----------------
 function initWebRTC() {
+    // Google STUN Servers (মোবাইল ডেটা বা ওয়াইফাইয়ের মধ্যে কানেকশন নিখুঁত করার জন্য)
+    const peerConfig = {
+        config: {
+            'iceServers': [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        }
+    };
+
     if (isHost) {
-        peer = new Peer(`host-${roomId}`);
+        peer = new Peer(`host-${roomId}`, peerConfig);
         peer.on('open', () => {
             updateStatus('Waiting for partner...', 'waiting', 'fa-spinner fa-spin');
-            shareLinkText.innerText = window.location.href;
+            
+            // নতুন লিংক জেনারেট (সাথে guest=true যুক্ত করা হয়েছে)
+            const shareUrl = window.location.origin + window.location.pathname + '?room=' + roomId + '&guest=true';
+            shareLinkText.innerText = shareUrl;
             waitingBox.style.display = 'block';
             loadHistory();
         });
 
         peer.on('connection', (incomingConn) => {
-            if (conn && conn.open) { // Reject 3rd person
+            if (conn && conn.open) { 
                 incomingConn.on('open', () => { incomingConn.send({ type: 'REJECT' }); setTimeout(() => incomingConn.close(), 500); });
                 return;
             }
@@ -72,14 +91,13 @@ function initWebRTC() {
             setupConnectionHandlers();
         });
     } else {
-        peer = new Peer();
+        peer = new Peer(peerConfig);
         peer.on('open', (id) => {
-            conn = peer.connect(`host-${roomId}`);
+            conn = peer.connect(`host-${roomId}`, { reliable: true });
             setupConnectionHandlers();
         });
     }
 
-    // Answer incoming calls automatically
     peer.on('call', (call) => {
         if(confirm("Incoming Call! Do you want to answer?")) {
             navigator.mediaDevices.getUserMedia({ video: call.metadata.type === 'video', audio: true }).then(stream => {
@@ -92,20 +110,18 @@ function initWebRTC() {
             call.close();
         }
     });
+
+    peer.on('error', (err) => {
+        console.error(err);
+        if(err.type === 'peer-unavailable') {
+            updateStatus('Host is offline or invalid link', 'disconnected', 'fa-circle-xmark');
+        }
+    });
 }
 
 function setupConnectionHandlers() {
-    conn.on('open', () => {
-        updateStatus('Connected & Secure', 'connected', 'fa-shield-check');
-        waitingBox.style.display = 'none';
-        
-        // Enable Controls
-        [msgInput, sendBtn, attachBtn, audioCallBtn, videoCallBtn].forEach(el => el.disabled = false);
-        
-        // Exchange Peer IDs for calling
-        conn.send({ type: 'HANDSHAKE', peerId: peer.id });
-        if(!isHost) loadHistory(); 
-    });
+    conn.on('open', handleConnectionOpen);
+    if (conn.open) handleConnectionOpen(); // কানেকশন অলরেডি ওপেন থাকলে ফিক্স
 
     conn.on('data', (data) => {
         if (data.type === 'REJECT') return showScreen(screens.error);
@@ -119,7 +135,6 @@ function setupConnectionHandlers() {
         if (data.type === 'FILE') {
             playBeep();
             displayFileMessage(data.fileData, data.fileName, data.fileType, 'peer');
-            // Not saving huge files to local storage to prevent browser crash
         }
         if (data.type === 'TYPING') {
             typingInd.style.display = data.status ? 'block' : 'none';
@@ -133,11 +148,20 @@ function setupConnectionHandlers() {
     });
 }
 
+function handleConnectionOpen() {
+    updateStatus('Connected & Secure', 'connected', 'fa-shield-check');
+    waitingBox.style.display = 'none';
+    
+    [msgInput, sendBtn, attachBtn, audioCallBtn, videoCallBtn].forEach(el => el.disabled = false);
+    
+    conn.send({ type: 'HANDSHAKE', peerId: peer.id });
+    if(!isHost) loadHistory(); 
+}
+
 // ---------------- Messaging & File Logic ----------------
 sendBtn.addEventListener('click', sendMessage);
 msgInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
 
-// Typing Indicator Logic
 msgInput.addEventListener('input', () => {
     if(conn && conn.open) {
         conn.send({ type: 'TYPING', status: true });
@@ -153,7 +177,7 @@ function sendMessage() {
         displayMessage(text, 'me');
         saveToHistory(text, 'me');
         msgInput.value = '';
-        conn.send({ type: 'TYPING', status: false }); // stop typing
+        conn.send({ type: 'TYPING', status: false }); 
     }
 }
 
@@ -161,7 +185,7 @@ attachBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    if (file.size > 2 * 1024 * 1024) return alert("File size must be under 2MB for browser stability.");
+    if (file.size > 2 * 1024 * 1024) return alert("File size must be under 2MB.");
     
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -212,7 +236,7 @@ function loadHistory() {
                 chatBox.innerHTML = '<div class="encryption-notice"><i class="fa-solid fa-lock"></i> All messages and calls are E2E Encrypted.</div>';
                 chatHistory.forEach(msg => displayMessage(msg.text, msg.sender));
             }
-        } catch (e) { console.error("History loading failed."); }
+        } catch (e) {}
     }
 }
 
