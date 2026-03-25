@@ -10,37 +10,31 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <style>
-        /* ওয়েবসাইটের কালার ও ডিজাইন */
         :root {
-            --bg-color: #0f172a;
-            --text-color: #f8fafc;
-            --primary: #10b981;
-            --primary-hover: #059669;
-            --danger: #ef4444;
-            --chat-bg: #1e293b;
-            --message-me: #10b981;
-            --message-peer: #334155;
+            --bg-color: #0f172a; --text-color: #f8fafc;
+            --primary: #10b981; --primary-hover: #059669;
+            --danger: #ef4444; --chat-bg: #1e293b;
+            --message-me: #10b981; --message-peer: #334155;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }
         body { background-color: var(--bg-color); color: var(--text-color); height: 100vh; display: flex; flex-direction: column; }
 
-        /* স্ক্রিন কন্ট্রোল (কোনটা কখন দেখাবে) */
         .screen { display: none; flex-direction: column; height: 100%; padding: 20px; align-items: center; justify-content: center; text-align: center; }
         .screen.active { display: flex; }
 
-        /* প্রথম স্ক্রিন (লিংক তৈরির পেজ) */
-        .btn { background-color: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 20px; transition: 0.3s; width: 100%; max-width: 300px; }
+        .btn { background-color: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; width: 100%; max-width: 300px; }
         .btn:hover { background-color: var(--primary-hover); }
-        .link-box { margin-top: 20px; padding: 15px; background: var(--chat-bg); border-radius: 8px; word-break: break-all; font-size: 14px; width: 100%; max-width: 400px; display: none; border: 1px solid var(--primary); }
-        
-        /* দ্বিতীয় স্ক্রিন (চ্যাট রুম) */
+
         #chat-screen { padding: 0; justify-content: space-between; }
         .header { background: var(--chat-bg); width: 100%; padding: 15px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
-        .status { font-size: 14px; color: var(--primary); font-weight: bold; display: flex; align-items: center; gap: 5px; }
-        .status i { font-size: 10px; }
+        .status { font-size: 14px; font-weight: bold; color: #fbbf24; }
         .header-actions button { background: none; border: none; color: white; font-size: 20px; margin-left: 15px; cursor: pointer; }
         
+        /* লিংক দেখানোর বক্স (চ্যাটের ভেতরে) */
+        #waiting-link-box { background: #334155; padding: 15px; margin: 15px; border-radius: 8px; border: 1px dashed var(--primary); display: none; }
+        #waiting-link-box p { word-break: break-all; color: var(--primary); font-size: 14px; margin-bottom: 10px; font-weight: bold; }
+
         .chat-box { flex: 1; width: 100%; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
         .message { max-width: 75%; padding: 10px 15px; border-radius: 15px; font-size: 15px; line-height: 1.4; word-wrap: break-word; }
         .message.me { background-color: var(--message-me); align-self: flex-end; border-bottom-right-radius: 2px; }
@@ -50,9 +44,7 @@
         .input-area input { flex: 1; padding: 12px 15px; border-radius: 25px; border: none; background: #0f172a; color: white; outline: none; font-size: 15px; }
         .send-btn { background: var(--primary); color: white; border: none; width: 45px; height: 45px; border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; font-size: 18px; }
 
-        /* তৃতীয় স্ক্রিন (ব্লক/এরর পেজ) */
-        #error-screen h2 { color: var(--danger); }
-        #error-screen p { margin-top: 10px; color: #94a3b8; }
+        #error-screen h2 { color: var(--danger); margin-top: 15px; }
     </style>
 </head>
 <body>
@@ -60,23 +52,23 @@
     <div id="setup-screen" class="screen active">
         <i class="fa-solid fa-shield-halved" style="font-size: 50px; color: var(--primary); margin-bottom: 20px;"></i>
         <h2>Secure P2P Chat</h2>
-        <p style="color: #94a3b8; margin-top: 10px; font-size: 14px;">End-to-End Encrypted. No Database.</p>
-        
+        <p style="color: #94a3b8; margin-top: 10px; margin-bottom: 20px; font-size: 14px;">End-to-End Encrypted. Max 2 Users.</p>
         <button id="create-btn" class="btn">Create Secure Link</button>
-        <div id="link-container" class="link-box">
-            <p id="share-link" style="color: #10b981; font-weight: bold; margin-bottom: 10px;"></p>
-            <button id="copy-btn" class="btn" style="margin-top: 5px; padding: 8px; background: #334155;">Copy Link</button>
-            <p style="margin-top: 15px; font-size: 12px; color: #94a3b8;">এই লিংকটি শুধুমাত্র একজনের সাথে শেয়ার করুন। তার যুক্ত হওয়ার অপেক্ষায়...</p>
-        </div>
     </div>
 
     <div id="chat-screen" class="screen">
         <div class="header">
-            <div class="status"><i class="fa-solid fa-circle"></i> Connected</div>
+            <div id="chat-status" class="status"><i class="fa-solid fa-spinner fa-spin"></i> Waiting...</div>
             <div class="header-actions">
-                <button id="clear-chat-btn" title="Delete Local History"><i class="fa-solid fa-trash-can"></i></button>
+                <button id="clear-chat-btn" title="Delete History"><i class="fa-solid fa-trash-can"></i></button>
                 <button id="audio-call-btn" title="Audio Call"><i class="fa-solid fa-phone"></i></button>
             </div>
+        </div>
+
+        <div id="waiting-link-box">
+            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 5px;">লিংকটি কপি করে আপনার বন্ধুকে দিন:</div>
+            <p id="share-link"></p>
+            <button id="copy-btn" class="btn" style="padding: 8px 15px; font-size: 14px;">Copy Link</button>
         </div>
         
         <div class="chat-box" id="chat-box">
@@ -86,53 +78,46 @@
         </div>
         
         <div class="input-area">
-            <input type="text" id="message-input" placeholder="Type a message...">
-            <button id="send-btn" class="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
+            <input type="text" id="message-input" placeholder="Type a message..." disabled>
+            <button id="send-btn" class="send-btn" disabled><i class="fa-solid fa-paper-plane"></i></button>
         </div>
     </div>
 
     <div id="error-screen" class="screen">
-        <i class="fa-solid fa-user-shield" style="font-size: 50px; color: var(--danger); margin-bottom: 20px;"></i>
-        <h2>Site Not Reachable</h2>
-        <p>এই চ্যাট রুমটি ব্লক করা হয়েছে অথবা লিংকটি ভুল। এখানে সর্বোচ্চ ২ জন যুক্ত থাকতে পারে।</p>
+        <i class="fa-solid fa-user-shield" style="font-size: 50px; color: var(--danger);"></i>
+        <h2>Access Denied</h2>
+        <p style="color: #94a3b8; margin-top: 10px;">এই চ্যাট রুমটি ব্লক করা হয়েছে অথবা লিংকটি ভুল। এখানে সর্বোচ্চ ২ জন যুক্ত থাকতে পারে।</p>
     </div>
 
     <script>
-        // UI Elements
-        const setupScreen = document.getElementById('setup-screen');
-        const chatScreen = document.getElementById('chat-screen');
-        const errorScreen = document.getElementById('error-screen');
-        const linkContainer = document.getElementById('link-container');
-        const shareLink = document.getElementById('share-link');
-        const chatBox = document.getElementById('chat-box');
-        const messageInput = document.getElementById('message-input');
-
         let peer = null;
         let conn = null;
+        let roomKey = "SecureKey"; 
         let chatHistory = [];
-        let roomKey = "SecureKey"; // Encryption Key
 
-        // স্ক্রিন পরিবর্তন করার ফাংশন
         function showScreen(screenId) {
             document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
             document.getElementById(screenId).classList.add('active');
         }
 
-        // Host (যে লিংক তৈরি করবে)
+        // Host: লিংক তৈরি করার লজিক
         document.getElementById('create-btn').addEventListener('click', () => {
-            document.getElementById('create-btn').innerText = "Creating...";
-            peer = new Peer(); // ফ্রি সার্ভারের মাধ্যমে কানেকশন তৈরি
+            document.getElementById('create-btn').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Creating...';
+            peer = new Peer(); 
             
             peer.on('open', (id) => {
-                roomKey = id; // চ্যাট হিস্ট্রি এনক্রিপ্ট করার জন্য আইডিকে পাসওয়ার্ড হিসেবে ব্যবহার
+                roomKey = id; 
                 const url = window.location.origin + window.location.pathname + '#' + id;
-                shareLink.innerText = url;
-                linkContainer.style.display = 'block';
-                document.getElementById('create-btn').style.display = 'none';
+                
+                // সাথে সাথে চ্যাট রুম ওপেন হবে
+                showScreen('chat-screen');
+                document.getElementById('share-link').innerText = url;
+                document.getElementById('waiting-link-box').style.display = 'block';
             });
 
+            // দ্বিতীয় ব্যক্তি জয়েন করলে
             peer.on('connection', (connection) => {
-                // ৩য় ব্যক্তিকে ব্লক করার লজিক
+                // ৩য় ব্যক্তিকে ব্লক করা
                 if (conn) {
                     connection.on('open', () => {
                         connection.send({ type: 'REJECT' });
@@ -145,36 +130,42 @@
             });
         });
 
-        // লিংক কপি করার বাটন
-        document.getElementById('copy-btn').addEventListener('click', () => {
-            navigator.clipboard.writeText(shareLink.innerText);
-            alert('লিংক কপি হয়েছে! যার সাথে কথা বলবেন তাকে পাঠিয়ে দিন।');
-        });
-
-        // Guest (যে লিংকে প্রবেশ করবে)
+        // Guest: লিংকে প্রবেশ করার লজিক
         window.onload = () => {
             const hash = window.location.hash;
             if (hash) {
                 const hostId = hash.substring(1);
                 roomKey = hostId;
-                peer = new Peer();
                 
+                showScreen('chat-screen');
+                document.getElementById('chat-status').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Connecting...';
+                
+                peer = new Peer();
                 peer.on('open', () => {
                     conn = peer.connect(hostId);
-                    setupChat();
+                    conn.on('open', () => {
+                        setupChat();
+                    });
                 });
             }
         };
 
-        // চ্যাট সেটআপ ও মেসেজ আদান-প্রদান
+        // লিংক কপি বাটন
+        document.getElementById('copy-btn').addEventListener('click', () => {
+            navigator.clipboard.writeText(document.getElementById('share-link').innerText);
+            alert('লিংক কপি হয়েছে! বন্ধুকে পাঠিয়ে দিন।');
+        });
+
+        // চ্যাট চালু করার ফাংশন
         function setupChat() {
-            conn.on('open', () => {
-                showScreen('chat-screen');
-                loadHistory(); // লোকাল স্টোরেজ থেকে পুরনো মেসেজ লোড
-            });
+            document.getElementById('waiting-link-box').style.display = 'none';
+            document.getElementById('chat-status').innerHTML = '<i class="fa-solid fa-circle" style="color: var(--primary);"></i> Connected';
+            document.getElementById('message-input').disabled = false;
+            document.getElementById('send-btn').disabled = false;
+            
+            loadHistory();
 
             conn.on('data', (data) => {
-                // যদি ৩য় ব্যক্তি হয়, তবে ব্লক মেসেজ দেখাবে
                 if (data.type === 'REJECT') {
                     showScreen('error-screen');
                     return;
@@ -186,37 +177,39 @@
             });
 
             conn.on('close', () => {
-                alert("কানেকশন বিচ্ছিন্ন হয়েছে!");
-                location.reload();
+                document.getElementById('chat-status').innerHTML = '<i class="fa-solid fa-circle-xmark" style="color: var(--danger);"></i> Disconnected';
+                document.getElementById('message-input').disabled = true;
+                document.getElementById('send-btn').disabled = true;
             });
         }
 
-        // মেসেজ পাঠানোর ফাংশন
+        // মেসেজ পাঠানো
         document.getElementById('send-btn').addEventListener('click', sendMessage);
-        messageInput.addEventListener('keypress', (e) => {
+        document.getElementById('message-input').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') sendMessage();
         });
 
         function sendMessage() {
-            const text = messageInput.value.trim();
+            const input = document.getElementById('message-input');
+            const text = input.value.trim();
             if (text && conn && conn.open) {
                 conn.send({ type: 'MSG', text: text });
                 displayMessage(text, 'me');
                 saveToHistory(text, 'me');
-                messageInput.value = '';
+                input.value = '';
             }
         }
 
-        // স্ক্রিনে মেসেজ দেখানো
         function displayMessage(text, sender) {
+            const box = document.getElementById('chat-box');
             const msgDiv = document.createElement('div');
             msgDiv.className = `message ${sender}`;
             msgDiv.innerText = text;
-            chatBox.appendChild(msgDiv);
-            chatBox.scrollTop = chatBox.scrollHeight;
+            box.appendChild(msgDiv);
+            box.scrollTop = box.scrollHeight;
         }
 
-        // হাই-সিকিউরিটি: CryptoJS দিয়ে মেসেজ এনক্রিপ্ট করে ব্রাউজারে সেভ করা
+        // ক্রিপ্টোগ্রাফি ও স্টোরেজ
         function saveToHistory(text, sender) {
             chatHistory.push({ text, sender });
             const encryptedData = CryptoJS.AES.encrypt(JSON.stringify(chatHistory), roomKey).toString();
@@ -234,25 +227,24 @@
                         chatHistory.forEach(msg => displayMessage(msg.text, msg.sender));
                     }
                 } catch (e) {
-                    console.error("ডেটা ডিক্রিপ্ট করতে সমস্যা হয়েছে!");
+                    console.error("Decryption failed!");
                 }
             }
         }
 
-        // চ্যাট হিস্ট্রি ডিলিট করা
+        // চ্যাট হিস্ট্রি ডিলিট
         document.getElementById('clear-chat-btn').addEventListener('click', () => {
-            if(confirm("আপনি কি আপনার ফোন থেকে এই চ্যাটের সব রেকর্ড চিরতরে মুছে ফেলতে চান?")) {
+            if(confirm("সব চ্যাট হিস্ট্রি মুছে ফেলতে চান?")) {
                 localStorage.removeItem(`secure_chat_${roomKey}`);
-                chatBox.innerHTML = '<div style="text-align: center; color: #64748b; font-size: 12px; margin-bottom: 15px;"><i class="fa-solid fa-lock"></i> Messages are End-to-End Encrypted.</div>';
+                document.getElementById('chat-box').innerHTML = '<div style="text-align: center; color: #64748b; font-size: 12px; margin-bottom: 15px;"><i class="fa-solid fa-lock"></i> Messages are End-to-End Encrypted.</div>';
                 chatHistory = [];
             }
         });
-
-        // অডিও কল (পরবর্তী ধাপের জন্য)
+        
+        // কলিং বাটন 
         document.getElementById('audio-call-btn').addEventListener('click', () => {
-            alert("অডিও কলিং ফিচারটি আমরা এর পরের ধাপে যুক্ত করব!");
+            alert("চ্যাটিং ঠিকঠাক কাজ করলে এরপর আমরা অডিও কল যুক্ত করব!");
         });
     </script>
-
 </body>
 </html>
