@@ -1,152 +1,178 @@
+// Copyright Owner : Muhammad Shourov
 // DOM Elements
-const screenSetup = document.getElementById('setup-screen');
-const screenChat = document.getElementById('chat-screen');
-const screenError = document.getElementById('error-screen');
+const screens = { setup: document.getElementById('setup-screen'), chat: document.getElementById('chat-screen'), error: document.getElementById('error-screen') };
 const statusDiv = document.getElementById('chat-status');
-const waitingBox = document.getElementById('waiting-link-box');
-const shareLinkText = document.getElementById('share-link');
-const chatBox = document.getElementById('chat-box');
-const msgInput = document.getElementById('message-input');
-const sendBtn = document.getElementById('send-btn');
+const waitingBox = document.getElementById('waiting-link-box'), shareLinkText = document.getElementById('share-link');
+const chatBox = document.getElementById('chat-box'), msgInput = document.getElementById('message-input'), sendBtn = document.getElementById('send-btn');
+const attachBtn = document.getElementById('attach-btn'), fileInput = document.getElementById('file-input');
+const typingInd = document.getElementById('typing-indicator');
+
+// Media Elements
+const audioCallBtn = document.getElementById('audio-call-btn'), videoCallBtn = document.getElementById('video-call-btn');
+const videoContainer = document.getElementById('video-container'), localVideo = document.getElementById('local-video'), remoteVideo = document.getElementById('remote-video');
+const endCallBtn = document.getElementById('end-call-btn');
 
 // Variables
-let peer = null;
-let conn = null;
-let chatHistory = [];
-let isHost = false;
+let peer = null, conn = null, currentCall = null, localStream = null;
+let chatHistory = [], isHost = false, peerRealId = null;
+let typingTimeout = null;
 
-// URL থেকে Room ID বের করা
+// Routing Logic
 const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room');
 
-// স্ক্রিন পরিবর্তনের ফাংশন
-function showScreen(screen) {
-    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-    screen.classList.add('active');
-}
+function showScreen(screen) { Object.values(screens).forEach(s => s.classList.remove('active')); screen.classList.add('active'); }
+function updateStatus(text, type, icon) { statusDiv.className = `status ${type}`; statusDiv.innerHTML = `<i class="fa-solid ${icon}"></i> ${text}`; }
 
-// স্ট্যাটাস আপডেট করার ফাংশন
-function updateStatus(text, type, icon) {
-    statusDiv.className = `status ${type}`;
-    statusDiv.innerHTML = `<i class="fa-solid ${icon}"></i> ${text}`;
+// Sound Notification API
+function playBeep() {
+    try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        osc.type = 'sine'; osc.frequency.setValueAtTime(800, ctx.currentTime);
+        gainNode.gain.setValueAtTime(0.1, ctx.currentTime); // Low volume
+        osc.connect(gainNode); gainNode.connect(ctx.destination);
+        osc.start(); osc.stop(ctx.currentTime + 0.15);
+    } catch(e) { console.log("Sound error ignored."); }
 }
 
 // ---------------- Initialization ----------------
 if (roomId) {
-    // রুমে প্রবেশ (URL এ Room ID আছে)
-    showScreen(screenChat);
-    
-    // চেক করা হচ্ছে সে এই রুমের হোস্ট কি না (আগে লিংকে ঢুকে থাকলে লোকাল স্টোরেজে ডেটা থাকবে)
-    if (localStorage.getItem(`host_${roomId}`) === 'true') {
-        isHost = true;
-    }
-
+    showScreen(screens.chat);
+    if (localStorage.getItem(`host_${roomId}`) === 'true') isHost = true;
     initWebRTC();
-} else {
-    // হোম পেজ (URL এ Room ID নেই)
-    showScreen(screenSetup);
-}
+} else { showScreen(screens.setup); }
 
-// ---------------- Host Logic: Create Room ----------------
 document.getElementById('create-btn').addEventListener('click', () => {
-    // একটি নতুন ইউনিক Room ID তৈরি করা
     const newRoomId = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 6);
-    
-    // হোস্ট হিসেবে লোকাল স্টোরেজে মার্ক করে রাখা
     localStorage.setItem(`host_${newRoomId}`, 'true');
-    
-    // URL পরিবর্তন করে ওই রুমে চলে যাওয়া
     window.location.href = '?room=' + newRoomId;
 });
 
-
-// ---------------- WebRTC & PeerJS Logic ----------------
+// ---------------- WebRTC Setup ----------------
 function initWebRTC() {
     if (isHost) {
-        // হোস্ট সবসময় নির্দিষ্ট আইডি নিয়ে সার্ভারে বসবে (যাতে গেস্ট তাকে খুঁজে পায়)
         peer = new Peer(`host-${roomId}`);
-        
         peer.on('open', () => {
-            updateStatus('Waiting for peer...', 'waiting', 'fa-spinner fa-spin');
-            
-            // লিংক দেখানো
-            const currentUrl = window.location.href;
-            shareLinkText.innerText = currentUrl;
+            updateStatus('Waiting for partner...', 'waiting', 'fa-spinner fa-spin');
+            shareLinkText.innerText = window.location.href;
             waitingBox.style.display = 'block';
-            
-            loadHistory(); // পূর্বের চ্যাট থাকলে লোড হবে
+            loadHistory();
         });
 
-        // কেউ যুক্ত হতে চাইলে
         peer.on('connection', (incomingConn) => {
-            // যদি আগে থেকেই কেউ কানেক্টেড থাকে, তবে ৩য় ব্যক্তিকে ব্লক করবে
-            if (conn && conn.open) {
-                incomingConn.on('open', () => {
-                    incomingConn.send({ type: 'REJECT' });
-                    setTimeout(() => incomingConn.close(), 500);
-                });
+            if (conn && conn.open) { // Reject 3rd person
+                incomingConn.on('open', () => { incomingConn.send({ type: 'REJECT' }); setTimeout(() => incomingConn.close(), 500); });
                 return;
             }
             conn = incomingConn;
             setupConnectionHandlers();
         });
-
     } else {
-        // গেস্ট রেন্ডম আইডি নিয়ে সার্ভারে ঢুকবে
         peer = new Peer();
-        
-        peer.on('open', () => {
-            // গেস্ট হোস্টের আইডিতে রিকোয়েস্ট পাঠাবে
+        peer.on('open', (id) => {
             conn = peer.connect(`host-${roomId}`);
             setupConnectionHandlers();
         });
     }
+
+    // Answer incoming calls automatically
+    peer.on('call', (call) => {
+        if(confirm("Incoming Call! Do you want to answer?")) {
+            navigator.mediaDevices.getUserMedia({ video: call.metadata.type === 'video', audio: true }).then(stream => {
+                localStream = stream;
+                localVideo.srcObject = stream;
+                call.answer(stream);
+                handleCallStream(call);
+            }).catch(err => alert("Camera/Microphone access denied."));
+        } else {
+            call.close();
+        }
+    });
 }
 
 function setupConnectionHandlers() {
     conn.on('open', () => {
-        updateStatus('Connected', 'connected', 'fa-shield-check');
+        updateStatus('Connected & Secure', 'connected', 'fa-shield-check');
         waitingBox.style.display = 'none';
-        msgInput.disabled = false;
-        sendBtn.disabled = false;
         
+        // Enable Controls
+        [msgInput, sendBtn, attachBtn, audioCallBtn, videoCallBtn].forEach(el => el.disabled = false);
+        
+        // Exchange Peer IDs for calling
+        conn.send({ type: 'HANDSHAKE', peerId: peer.id });
         if(!isHost) loadHistory(); 
     });
 
     conn.on('data', (data) => {
-        if (data.type === 'REJECT') {
-            showScreen(screenError);
-            return;
-        }
+        if (data.type === 'REJECT') return showScreen(screens.error);
+        if (data.type === 'HANDSHAKE') peerRealId = data.peerId;
+        
         if (data.type === 'MSG') {
+            playBeep();
             displayMessage(data.text, 'peer');
             saveToHistory(data.text, 'peer');
+        }
+        if (data.type === 'FILE') {
+            playBeep();
+            displayFileMessage(data.fileData, data.fileName, data.fileType, 'peer');
+            // Not saving huge files to local storage to prevent browser crash
+        }
+        if (data.type === 'TYPING') {
+            typingInd.style.display = data.status ? 'block' : 'none';
         }
     });
 
     conn.on('close', () => {
-        updateStatus('Peer Disconnected', 'disconnected', 'fa-circle-xmark');
-        msgInput.disabled = true;
-        sendBtn.disabled = true;
+        updateStatus('Partner Offline', 'disconnected', 'fa-circle-xmark');
+        [msgInput, sendBtn, attachBtn, audioCallBtn, videoCallBtn].forEach(el => el.disabled = true);
+        if(currentCall) endCall();
     });
 }
 
-// ---------------- Messaging Logic ----------------
+// ---------------- Messaging & File Logic ----------------
 sendBtn.addEventListener('click', sendMessage);
-msgInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') sendMessage();
+msgInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
+
+// Typing Indicator Logic
+msgInput.addEventListener('input', () => {
+    if(conn && conn.open) {
+        conn.send({ type: 'TYPING', status: true });
+        clearTimeout(typingTimeout);
+        typingTimeout = setTimeout(() => conn.send({ type: 'TYPING', status: false }), 1500);
+    }
 });
 
 function sendMessage() {
     const text = msgInput.value.trim();
     if (text && conn && conn.open) {
-        // এনক্রিপ্টেড কমিউনিকেশন (WebRTC বাই-ডিফল্ট E2EE)
         conn.send({ type: 'MSG', text: text });
         displayMessage(text, 'me');
         saveToHistory(text, 'me');
         msgInput.value = '';
+        conn.send({ type: 'TYPING', status: false }); // stop typing
     }
 }
+
+attachBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) return alert("File size must be under 2MB for browser stability.");
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        const base64Data = event.target.result;
+        if (conn && conn.open) {
+            conn.send({ type: 'FILE', fileName: file.name, fileType: file.type, fileData: base64Data });
+            displayFileMessage(base64Data, file.name, file.type, 'me');
+        }
+    };
+    reader.readAsDataURL(file);
+});
 
 function displayMessage(text, sender) {
     const msgDiv = document.createElement('div');
@@ -156,30 +182,76 @@ function displayMessage(text, sender) {
     chatBox.scrollTop = chatBox.scrollHeight;
 }
 
+function displayFileMessage(dataUrl, fileName, fileType, sender) {
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `message ${sender}`;
+    if (fileType.startsWith('image/')) {
+        msgDiv.innerHTML = `<img src="${dataUrl}" alt="${fileName}"><br><small>${fileName}</small>`;
+    } else {
+        msgDiv.innerHTML = `<i class="fa-solid fa-file"></i> <a href="${dataUrl}" download="${fileName}" style="color: inherit;">${fileName}</a>`;
+    }
+    chatBox.appendChild(msgDiv);
+    chatBox.scrollTop = chatBox.scrollHeight;
+}
+
 // ---------------- Storage & Encryption ----------------
 function saveToHistory(text, sender) {
     chatHistory.push({ text, sender });
     const encryptedData = CryptoJS.AES.encrypt(JSON.stringify(chatHistory), roomId).toString();
-    localStorage.setItem(`chat_history_${roomId}`, encryptedData);
+    localStorage.setItem(`chat_${roomId}`, encryptedData);
 }
 
 function loadHistory() {
-    const encryptedData = localStorage.getItem(`chat_history_${roomId}`);
+    const encryptedData = localStorage.getItem(`chat_${roomId}`);
     if (encryptedData) {
         try {
             const bytes = CryptoJS.AES.decrypt(encryptedData, roomId);
             const decryptedText = bytes.toString(CryptoJS.enc.Utf8);
             if (decryptedText) {
                 chatHistory = JSON.parse(decryptedText);
+                chatBox.innerHTML = '<div class="encryption-notice"><i class="fa-solid fa-lock"></i> All messages and calls are E2E Encrypted.</div>';
                 chatHistory.forEach(msg => displayMessage(msg.text, msg.sender));
             }
-        } catch (e) {
-            console.error("Encryption mismatch or corrupted data.");
-        }
+        } catch (e) { console.error("History loading failed."); }
     }
 }
 
-// ---------------- Extra Features ----------------
+// ---------------- Audio & Video Call Logic ----------------
+function startCall(isVideo) {
+    if (!peerRealId && isHost) peerRealId = conn.peer; 
+    const targetPeerId = isHost ? peerRealId : `host-${roomId}`;
+
+    navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true }).then(stream => {
+        localStream = stream;
+        localVideo.srcObject = stream;
+        const call = peer.call(targetPeerId, stream, { metadata: { type: isVideo ? 'video' : 'audio' } });
+        handleCallStream(call);
+    }).catch(err => alert("Camera/Microphone access required for calls."));
+}
+
+function handleCallStream(call) {
+    currentCall = call;
+    videoContainer.style.display = 'block';
+    
+    call.on('stream', (remoteStream) => {
+        remoteVideo.srcObject = remoteStream;
+    });
+    call.on('close', endCall);
+}
+
+function endCall() {
+    if(currentCall) currentCall.close();
+    if(localStream) localStream.getTracks().forEach(track => track.stop());
+    videoContainer.style.display = 'none';
+    currentCall = null;
+    localStream = null;
+}
+
+audioCallBtn.addEventListener('click', () => startCall(false));
+videoCallBtn.addEventListener('click', () => startCall(true));
+endCallBtn.addEventListener('click', endCall);
+
+// ---------------- Extras ----------------
 document.getElementById('copy-btn').addEventListener('click', () => {
     navigator.clipboard.writeText(shareLinkText.innerText);
     const btn = document.getElementById('copy-btn');
@@ -187,16 +259,12 @@ document.getElementById('copy-btn').addEventListener('click', () => {
     setTimeout(() => btn.innerHTML = '<i class="fa-solid fa-copy"></i> Copy Link', 2000);
 });
 
-// রুম ক্লোজ এবং ডেটা ডিলিট করা
 document.getElementById('close-room-btn').addEventListener('click', () => {
-    if(confirm("Are you sure you want to close this room and delete all chat history?")) {
-        localStorage.removeItem(`chat_history_${roomId}`);
+    if(confirm("Destroy room and delete history?")) {
+        localStorage.removeItem(`chat_${roomId}`);
         localStorage.removeItem(`host_${roomId}`);
         if(conn) conn.close();
-        window.location.href = '?'; // হোম পেজে রিডাইরেক্ট 
+        if(currentCall) endCall();
+        window.location.href = '?'; 
     }
-});
-
-document.getElementById('call-btn').addEventListener('click', () => {
-    alert("Audio call feature integration will be implemented next.");
 });
