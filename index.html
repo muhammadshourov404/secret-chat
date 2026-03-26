@@ -3,244 +3,314 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="theme-color" content="#070b14">
-  <meta name="description" content="Secure P2P Chat & Call — End-to-End Encrypted, No Server, No Account.">
+  <meta name="theme-color" content="#06090f">
+  <meta name="description" content="Secure P2P Chat & Call — Encrypted, No Server, Host-Controlled Access.">
   <title>Secure P2P — Chat & Call</title>
   <link rel="stylesheet" href="style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" crossorigin="anonymous">
-  <!-- PeerJS v1.5.2 -->
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
-  <!-- CryptoJS v4.2.0 -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js" crossorigin="anonymous"></script>
 </head>
 <body>
 
-  <!-- ═══════════════════════════════════════════
-       SCREEN 1 — SETUP / HOME
-  ═══════════════════════════════════════════ -->
-  <div id="screen-setup" class="screen active">
-    <div class="bg-grid"></div>
-    <div class="setup-wrap">
+<!-- ═══════════════════════════════════
+     SCREEN 1 — SETUP (Create / Join)
+═══════════════════════════════════ -->
+<div id="screen-setup" class="screen active">
+  <div class="noise-layer"></div>
+  <div class="hex-grid"></div>
 
-      <!-- Brand -->
-      <div class="brand-block">
-        <div class="brand-emblem">
-          <div class="emblem-ring ring-1"></div>
-          <div class="emblem-ring ring-2"></div>
-          <div class="emblem-core"><i class="fas fa-shield-halved"></i></div>
+  <div class="setup-container">
+    <!-- Logo -->
+    <div class="logo-wrap">
+      <div class="logo-orb">
+        <div class="orb-ring r1"></div>
+        <div class="orb-ring r2"></div>
+        <div class="orb-ring r3"></div>
+        <div class="orb-core"><i class="fas fa-shield-halved"></i></div>
+      </div>
+      <div class="logo-text">
+        <span class="lt-main">Secure<span class="accent">P2P</span></span>
+        <span class="lt-sub">Chat &amp; Call</span>
+      </div>
+    </div>
+
+    <!-- Feature strip -->
+    <div class="feat-strip">
+      <div class="feat-item"><i class="fas fa-lock"></i><span>AES-256</span></div>
+      <div class="feat-sep"></div>
+      <div class="feat-item"><i class="fas fa-server"></i><span>No Server</span></div>
+      <div class="feat-sep"></div>
+      <div class="feat-item"><i class="fas fa-user-shield"></i><span>Host Control</span></div>
+      <div class="feat-sep"></div>
+      <div class="feat-item"><i class="fas fa-eye-slash"></i><span>Zero Logs</span></div>
+    </div>
+
+    <!-- Card -->
+    <div class="setup-card">
+      <!-- Join mode banner (shown when ?room= in URL) -->
+      <div id="join-banner" style="display:none" class="join-banner">
+        <i class="fas fa-door-open"></i>
+        <div>
+          <span class="jb-label">Joining Room</span>
+          <span id="join-room-id" class="jb-id">—</span>
         </div>
-        <h1 class="brand-name">Secure P2P</h1>
-        <p class="brand-tagline">Chat <span class="amp">&amp;</span> Call</p>
-        <div class="enc-label"><i class="fas fa-lock"></i> AES-256 · WebRTC · Zero Logs</div>
       </div>
 
-      <!-- Feature Pills -->
-      <div class="feature-pills">
-        <span class="pill"><i class="fas fa-bolt"></i> Real-time</span>
-        <span class="pill"><i class="fas fa-eye-slash"></i> Zero Knowledge</span>
-        <span class="pill"><i class="fas fa-users"></i> 1-on-1 Only</span>
-        <span class="pill"><i class="fas fa-cloud-slash"></i> No Server</span>
+      <!-- Name input (always shown) -->
+      <div class="field-group">
+        <label class="field-label"><i class="fas fa-user"></i> Your Display Name</label>
+        <input type="text" id="name-input" class="field-input" placeholder="Enter your name…" maxlength="30" autocomplete="off" spellcheck="false">
       </div>
 
-      <!-- CTA -->
-      <button id="btn-create-room" class="btn-create">
-        <span class="btn-glow"></span>
+      <!-- Host mode: extra options -->
+      <div id="host-options" class="host-options">
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <i class="fas fa-shield-check"></i>
+            <span>Require approval for each join request</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="approval-toggle" checked>
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Buttons -->
+      <button id="btn-create-room" class="cta-btn primary">
         <i class="fas fa-plus-circle"></i>
         <span>Create Secure Room</span>
+        <div class="btn-shine"></div>
       </button>
 
-      <div class="divider-line"><span>or join via shared link</span></div>
-
-      <div class="hint-box">
-        <i class="fas fa-link"></i>
-        <p>Your contact will share a private link. Click it to join — <strong>max 2 people per room.</strong></p>
-      </div>
-
+      <button id="btn-join-room" class="cta-btn secondary" style="display:none">
+        <i class="fas fa-arrow-right-to-bracket"></i>
+        <span>Request to Join</span>
+      </button>
     </div>
 
-    <!-- Footer -->
-    <footer class="setup-footer">
-      <div class="footer-copy">
-        <i class="fas fa-copyright"></i>
-        Copyright Owner: <strong>Muhammad Shourov</strong>
-      </div>
-      <div class="footer-sub">Secure P2P Chat &amp; Call — Open Source, Privacy First</div>
+    <footer class="setup-foot">
+      <i class="fas fa-copyright"></i>
+      Copyright Owner: <strong>Muhammad Shourov</strong>
+      <span class="foot-dot">·</span> Secure P2P Chat &amp; Call
     </footer>
   </div>
+</div>
 
 
-  <!-- ═══════════════════════════════════════════
-       SCREEN 2 — CHAT ROOM
-  ═══════════════════════════════════════════ -->
-  <div id="screen-chat" class="screen">
-
-    <!-- ── HEADER ── -->
-    <header class="chat-header">
-      <div class="hdr-left">
-        <div class="app-avatar"><i class="fas fa-shield-halved"></i></div>
-        <div class="hdr-info">
-          <span class="hdr-name">P2P Secure</span>
-          <div class="status-row" id="status-row">
-            <span class="sdot waiting" id="status-dot"></span>
-            <span id="status-text" class="stext">Waiting for peer…</span>
-          </div>
-        </div>
-      </div>
-      <div class="hdr-right">
-        <button class="hbtn" id="btn-audio-call" title="Voice Call" disabled>
-          <i class="fas fa-phone"></i>
-        </button>
-        <button class="hbtn" id="btn-video-call" title="Video Call" disabled>
-          <i class="fas fa-video"></i>
-        </button>
-        <button class="hbtn danger" id="btn-destroy" title="Destroy Room &amp; Wipe Data">
-          <i class="fas fa-skull-crossbones"></i>
-        </button>
-      </div>
-    </header>
-
-    <!-- ── SHARE BANNER (host only, hidden after connect) ── -->
-    <div id="share-banner" class="share-banner" style="display:none">
-      <p class="share-label"><i class="fas fa-share-nodes"></i> Share this private link:</p>
-      <div class="share-row">
-        <input type="text" id="share-link-input" class="share-input" readonly>
-        <button id="btn-copy-link" class="copy-btn">
-          <i class="fas fa-copy"></i><span>Copy</span>
-        </button>
-      </div>
+<!-- ═══════════════════════════════════
+     SCREEN 2 — WAITING FOR APPROVAL
+═══════════════════════════════════ -->
+<div id="screen-waiting" class="screen">
+  <div class="noise-layer"></div>
+  <div class="wait-wrap">
+    <div class="wait-anim">
+      <div class="wa-ring wring-1"></div>
+      <div class="wa-ring wring-2"></div>
+      <div class="wa-ring wring-3"></div>
+      <div class="wa-core"><i class="fas fa-hourglass-half"></i></div>
     </div>
+    <h2 class="wait-title">Waiting for approval…</h2>
+    <p class="wait-sub">The host will let you in shortly.</p>
+    <div class="wait-you"><i class="fas fa-user"></i> <span id="wait-name-display">—</span></div>
+    <button id="btn-cancel-wait" class="cta-btn ghost" style="margin-top:1.5rem">
+      <i class="fas fa-times"></i><span>Cancel</span>
+    </button>
+  </div>
+</div>
 
-    <!-- ── VIDEO AREA (shown only during calls) ── -->
-    <div id="video-area" class="video-area" style="display:none">
-      <div class="video-stage">
-        <video id="remote-video" class="remote-vid" autoplay playsinline></video>
-        <video id="local-video" class="local-pip" autoplay playsinline muted></video>
-        <div class="call-overlay-ctrls">
-          <button id="btn-toggle-mic" class="ccbtn active" title="Toggle Microphone">
-            <i class="fas fa-microphone"></i>
-          </button>
-          <button id="btn-toggle-cam" class="ccbtn active" title="Toggle Camera">
-            <i class="fas fa-video"></i>
-          </button>
-          <button id="btn-end-call" class="ccbtn end-call" title="End Call">
-            <i class="fas fa-phone-slash"></i>
-          </button>
+
+<!-- ═══════════════════════════════════
+     SCREEN 3 — CHAT
+═══════════════════════════════════ -->
+<div id="screen-chat" class="screen">
+
+  <!-- ── TOP HEADER ── -->
+  <header class="chat-hdr">
+    <div class="chdr-left">
+      <div class="chdr-avatar"><i class="fas fa-shield-halved"></i></div>
+      <div class="chdr-meta">
+        <span class="chdr-name">SecureP2P</span>
+        <div class="chdr-status">
+          <span class="sdot" id="sdot"></span>
+          <span id="stext" class="stext">Initializing…</span>
         </div>
       </div>
     </div>
-
-    <!-- ── INCOMING CALL OVERLAY ── -->
-    <div id="incoming-call-overlay" class="incoming-overlay" style="display:none">
-      <div class="inc-card">
-        <div class="inc-icon-wrap">
-          <div class="inc-pulse"></div>
-          <i class="fas fa-phone-volume inc-icon"></i>
-        </div>
-        <h3>Incoming <span id="ic-type-label">Video</span> Call</h3>
-        <p class="inc-sub">from your secure peer</p>
-        <div class="inc-actions">
-          <button id="btn-accept-call" class="ic-btn accept">
-            <i class="fas fa-phone"></i>
-          </button>
-          <button id="btn-decline-call" class="ic-btn decline">
-            <i class="fas fa-phone-slash"></i>
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── MESSAGES AREA ── -->
-    <div id="messages-area" class="messages-area">
-      <div id="messages-list" class="messages-list">
-        <!-- Dynamically inserted messages -->
-      </div>
-      <!-- Typing Indicator -->
-      <div id="typing-indicator" class="typing-indicator" style="display:none">
-        <div class="typing-bubble">
-          <span class="td"></span>
-          <span class="td"></span>
-          <span class="td"></span>
-        </div>
-        <span class="typing-label">Peer is typing…</span>
-      </div>
-    </div>
-
-    <!-- ── FILE TRANSFER PROGRESS ── -->
-    <div id="xfer-progress-wrap" class="xfer-progress-wrap" style="display:none">
-      <div class="xfer-bar-bg">
-        <div id="xfer-bar-fill" class="xfer-bar-fill"></div>
-      </div>
-      <span id="xfer-label" class="xfer-label">Sending… 0%</span>
-    </div>
-
-    <!-- ── INPUT AREA ── -->
-    <div class="input-area">
-      <label class="attach-lbl hbtn" for="file-input" title="Attach File">
-        <i class="fas fa-paperclip"></i>
-      </label>
-      <input type="file" id="file-input" style="display:none">
-      <textarea
-        id="msg-input"
-        class="msg-textarea"
-        placeholder="Type a message…"
-        rows="1"
-        maxlength="10000"
-        disabled
-      ></textarea>
-      <button id="btn-send" class="send-btn" title="Send" disabled>
-        <i class="fas fa-paper-plane"></i>
+    <div class="chdr-right">
+      <button class="hbtn" id="btn-participants" title="Participants">
+        <i class="fas fa-users"></i>
+        <span class="participant-badge" id="p-badge" style="display:none">0</span>
+      </button>
+      <button class="hbtn" id="btn-audio-call" title="Voice Call" disabled>
+        <i class="fas fa-phone"></i>
+      </button>
+      <button class="hbtn" id="btn-video-call" title="Video Call" disabled>
+        <i class="fas fa-video"></i>
+      </button>
+      <button class="hbtn danger" id="btn-destroy" title="Destroy Room">
+        <i class="fas fa-skull-crossbones"></i>
       </button>
     </div>
+  </header>
 
-  </div><!-- /screen-chat -->
-
-
-  <!-- ═══════════════════════════════════════════
-       SCREEN 3 — ACCESS DENIED / ERROR
-  ═══════════════════════════════════════════ -->
-  <div id="screen-error" class="screen">
-    <div class="error-wrap">
-      <div class="err-icon-ring">
-        <i class="fas fa-ban err-icon"></i>
-      </div>
-      <h2 id="err-title">Access Denied</h2>
-      <p id="err-msg">This room is full or the link is invalid.</p>
-      <button class="btn-create" onclick="window.location.href = window.location.pathname" style="margin-top:1.5rem">
-        <i class="fas fa-house"></i><span>Back to Home</span>
-      </button>
-    </div>
-  </div>
-
-
-  <!-- ═══════════════════════════════════════════
-       LOADING OVERLAY (global spinner)
-  ═══════════════════════════════════════════ -->
-  <div id="loading-overlay" class="loading-overlay" style="display:none">
-    <div class="loader-ring"></div>
-    <p id="loading-text">Initializing…</p>
-  </div>
-
-
-  <!-- ═══════════════════════════════════════════
-       CONFIRM MODAL (for destroy room)
-  ═══════════════════════════════════════════ -->
-  <div id="confirm-modal" class="modal-backdrop" style="display:none">
-    <div class="modal-box">
-      <div class="modal-icon"><i class="fas fa-triangle-exclamation"></i></div>
-      <h3>Destroy Room?</h3>
-      <p>This will permanently delete all messages, encryption keys, and disconnect both peers. This <strong>cannot be undone</strong>.</p>
-      <div class="modal-actions">
-        <button id="modal-cancel" class="mbtn secondary">Cancel</button>
-        <button id="modal-confirm" class="mbtn danger">
-          <i class="fas fa-skull-crossbones"></i> Destroy
-        </button>
+  <!-- ── SHARE BANNER (host, before anyone joins) ── -->
+  <div id="share-banner" class="share-banner" style="display:none">
+    <div class="sb-icon"><i class="fas fa-share-nodes"></i></div>
+    <div class="sb-main">
+      <span class="sb-label">Share this link to invite</span>
+      <div class="sb-row">
+        <input type="text" id="share-link-input" class="sb-input" readonly>
+        <button id="btn-copy" class="sb-copy"><i class="fas fa-copy"></i><span>Copy</span></button>
+        <button id="btn-share" class="sb-copy" style="display:none"><i class="fas fa-share"></i><span>Share</span></button>
       </div>
     </div>
   </div>
 
-  <script src="script.js"></script>
+  <!-- ── APPROVAL QUEUE (host only) ── -->
+  <div id="approval-queue" class="approval-queue" style="display:none">
+    <div class="aq-card" id="aq-card">
+      <div class="aq-left">
+        <div class="aq-avi"><i class="fas fa-user-clock"></i></div>
+        <div class="aq-info">
+          <span class="aq-title">Join Request</span>
+          <span id="aq-name" class="aq-name">—</span>
+        </div>
+      </div>
+      <div class="aq-actions">
+        <button id="btn-approve" class="aq-btn approve"><i class="fas fa-check"></i> Accept</button>
+        <button id="btn-reject" class="aq-btn reject"><i class="fas fa-times"></i> Reject</button>
+      </div>
+    </div>
+    <div id="aq-count-row" class="aq-count" style="display:none">
+      <i class="fas fa-clock"></i> <span id="aq-pending-count">0</span> more waiting…
+    </div>
+  </div>
+
+  <!-- ── VIDEO AREA ── -->
+  <div id="video-area" class="video-area" style="display:none">
+    <div class="vid-stage">
+      <video id="remote-video" class="remote-vid" autoplay playsinline></video>
+      <video id="local-video"  class="local-pip"  autoplay playsinline muted></video>
+      <div class="vid-call-info" id="call-peer-info">Calling…</div>
+      <div class="vid-ctrls">
+        <button id="btn-tog-mic" class="vbtn active" title="Microphone"><i class="fas fa-microphone"></i></button>
+        <button id="btn-tog-cam" class="vbtn active" title="Camera"><i class="fas fa-video"></i></button>
+        <button id="btn-end-call" class="vbtn end"><i class="fas fa-phone-slash"></i></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MESSAGES ── -->
+  <div id="msg-area" class="msg-area">
+    <div id="msg-list" class="msg-list"></div>
+    <div id="typing-row" class="typing-row" style="display:none">
+      <div class="typing-bubble"><span></span><span></span><span></span></div>
+      <span id="typing-label" class="typing-label">Someone is typing…</span>
+    </div>
+  </div>
+
+  <!-- ── FILE XFER PROGRESS ── -->
+  <div id="xfer-wrap" class="xfer-wrap" style="display:none">
+    <div class="xfer-track"><div id="xfer-fill" class="xfer-fill"></div></div>
+    <span id="xfer-label" class="xfer-lbl">0%</span>
+  </div>
+
+  <!-- ── INPUT ── -->
+  <div class="input-bar">
+    <label class="ib-attach" for="file-input" title="Attach File"><i class="fas fa-paperclip"></i></label>
+    <input type="file" id="file-input" style="display:none">
+    <textarea id="msg-input" class="ib-textarea" placeholder="Type a message…" rows="1" maxlength="10000" disabled></textarea>
+    <button id="btn-send" class="ib-send" disabled><i class="fas fa-paper-plane"></i></button>
+  </div>
+
+  <!-- ── PARTICIPANTS PANEL (slide-in) ── -->
+  <div id="participants-panel" class="p-panel">
+    <div class="pp-hdr">
+      <span><i class="fas fa-users"></i> Participants</span>
+      <button id="btn-close-panel" class="pp-close"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div id="pp-list" class="pp-list">
+      <!-- injected by JS -->
+    </div>
+  </div>
+  <div id="panel-overlay" class="panel-overlay" style="display:none"></div>
+
+  <!-- ── INCOMING CALL ── -->
+  <div id="incoming-call" class="ic-overlay" style="display:none">
+    <div class="ic-card">
+      <div class="ic-anim">
+        <div class="ic-pulse"></div>
+        <i class="fas fa-phone-volume ic-icon"></i>
+      </div>
+      <h3>Incoming <span id="ic-type">Video</span> Call</h3>
+      <p id="ic-caller-name" class="ic-caller">from Unknown</p>
+      <div class="ic-btns">
+        <button id="btn-accept-call" class="icb accept"><i class="fas fa-phone"></i></button>
+        <button id="btn-decline-call" class="icb decline"><i class="fas fa-phone-slash"></i></button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /screen-chat -->
+
+
+<!-- ═══════════════════════════════════
+     SCREEN 4 — ERROR / REJECTED
+═══════════════════════════════════ -->
+<div id="screen-error" class="screen">
+  <div class="noise-layer"></div>
+  <div class="err-wrap">
+    <div class="err-orb"><i class="fas fa-ban"></i></div>
+    <h2 id="err-title">Access Denied</h2>
+    <p id="err-msg">This room is unavailable.</p>
+    <button class="cta-btn ghost" onclick="location.href=location.pathname">
+      <i class="fas fa-house"></i><span>Back to Home</span>
+    </button>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════
+     GLOBAL OVERLAYS
+═══════════════════════════════════ -->
+
+<!-- Loading -->
+<div id="loading" class="g-overlay" style="display:none">
+  <div class="g-spinner"></div>
+  <p id="loading-txt">Please wait…</p>
+</div>
+
+<!-- Confirm Destroy Modal -->
+<div id="modal-destroy" class="modal-bd" style="display:none">
+  <div class="modal-box">
+    <div class="modal-ico warn"><i class="fas fa-triangle-exclamation"></i></div>
+    <h3>Destroy Room?</h3>
+    <p>All messages, keys, and connections will be <strong>permanently deleted</strong>. This cannot be undone.</p>
+    <div class="modal-row">
+      <button id="md-cancel" class="cta-btn ghost sm">Cancel</button>
+      <button id="md-confirm" class="cta-btn danger sm"><i class="fas fa-skull-crossbones"></i> Destroy</button>
+    </div>
+  </div>
+</div>
+
+<!-- Call Target Picker (for multi-user: choose who to call) -->
+<div id="modal-call-target" class="modal-bd" style="display:none">
+  <div class="modal-box">
+    <div class="modal-ico call"><i class="fas fa-phone"></i></div>
+    <h3>Call a Participant</h3>
+    <p id="ct-call-type-label" class="modal-sub">Choose who you want to call:</p>
+    <div id="ct-list" class="ct-list">
+      <!-- injected -->
+    </div>
+    <button id="ct-cancel" class="cta-btn ghost sm" style="margin-top:1rem">Cancel</button>
+  </div>
+</div>
+
+<script src="script.js"></script>
 </body>
 </html>
