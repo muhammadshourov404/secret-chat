@@ -1,1469 +1,1382 @@
 'use strict';
-/* ═══════════════════════════════════════════════════════════
-   SECURE P2P  v2.0  —  script.js
+/* ════════════════════════════════════════════════════════
+   SECURE P2P  v3.0  —  script.js
    Copyright Owner: Muhammad Shourov
-   Architecture: Star-topology WebRTC · Host-Approval · AES-256
-   Features: Multi-user · TURN · File Chunking · Auto-prune LS
-═══════════════════════════════════════════════════════════ */
+   ─────────────────────────────────────────────────────
+   KEY FIXES FROM v2.0:
+   ① PeerJS serialization: use conn.send(OBJECT) directly
+     (PeerJS json-serializes internally — no JSON.stringify
+      on send, no JSON.parse on receive → messages now work)
+   ② Host-only Destroy button; Guest gets Leave button
+   ③ Guest retry logic → fixes "Host Not Found" errors
+   ④ Clean star-topology relay (host = hub)
+   ⑤ Stable participant list sync
+════════════════════════════════════════════════════════ */
 
-/* ──────────────────────────────────────────
+/* ────────────────────────────────────────
    1. CONFIG
-────────────────────────────────────────── */
+──────────────────────────────────────── */
 const CFG = {
   ICE: [
-    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun.l.google.com:19302'  },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
-    { urls: 'turn:openrelay.metered.ca:80',   username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443',  username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+    /* ── Free TURN servers (OpenRelay — no sign-up) ── */
+    { urls:'turn:openrelay.metered.ca:80',  username:'openrelayproject', credential:'openrelayproject' },
+    { urls:'turn:openrelay.metered.ca:443', username:'openrelayproject', credential:'openrelayproject' },
+    { urls:'turns:openrelay.metered.ca:443?transport=tcp', username:'openrelayproject', credential:'openrelayproject' }
   ],
-  MAX_MSGS:    60,      // keep last 60 messages in localStorage
-  CHUNK_SIZE:  16384,   // 16 KB chunks (WebRTC DataChannel safe limit)
-  TYPING_STOP: 2500,    // ms idle before 'stopped typing'
-  TYPING_SEND: 1500,    // ms between typing signals
-  PREFIX:      'sp2p-', // peer ID prefix
-  CONNECT_TO:  12000    // ms connection timeout
+  MAX_MSGS:    60,     // auto-prune localStorage
+  CHUNK_SIZE:  16384,  // 16 KB per WebRTC chunk
+  TYPING_STOP: 2500,   // ms before "stopped typing"
+  TYPING_GAP:  1500,   // min ms between typing signals
+  PREFIX:      'sp2p', // PeerJS ID prefix
+  JOIN_TIMEOUT:14000,  // ms before guest shows connection error
+  MAX_RETRIES: 6,      // guest retry attempts for "host not found"
+  RETRY_DELAY: 3500    // ms between retries
 };
 
-/* ──────────────────────────────────────────
+/* ────────────────────────────────────────
    2. STATE
-────────────────────────────────────────── */
+──────────────────────────────────────── */
 const S = {
-  peer:         null,
-  isHost:       false,
-  roomId:       null,
-  myName:       null,
-  encKey:       null,
-  requireApproval: true,
+  peer:           null,   // PeerJS Peer object
+  roomId:         null,
+  myName:         null,
+  encKey:         null,
+  isHost:         false,
+  requireApproval:true,
 
-  /* HOST: peerId → { conn, name, approved } */
-  guests:       new Map(),
+  /* HOST: Map<peerId, { conn, name, approved:bool }> */
+  guests:         new Map(),
 
-  /* GUEST: connection to host */
-  hostConn:     null,
+  /* GUEST: DataConnection to host */
+  hostConn:       null,
 
-  /* Participants cache: [{peerId, name, isHost}] */
-  participants: [],
+  /* Current participant list (shown in panel) */
+  participants:   [],     // [{ peerId, name, isHost }]
 
   /* Approval queue (host) */
-  aqQueue:      [],   // [{peerId, name, conn}]
-  aqShowing:    false,
+  aqQueue:        [],     // [{ peerId, name, conn }]
+  aqActive:       false,
 
   /* Call state */
-  activeCall:   null,
-  pendingCall:  null,
-  localStream:  null,
-  pendingCallVideo: false,
-  callTargetVideoEnabled: false,
-  micOn: true,
-  camOn: true,
+  activeCall:     null,
+  pendingCall:    null,
+  pendingVideo:   false,
+  localStream:    null,
+  micOn:          true,
+  camOn:          true,
 
-  /* File chunking */
-  fileIncoming: {},   // fileId → { chunks[], total, received, name, mimeType, size }
+  /* File chunks in-flight */
+  incoming:       {},     // fileId → { chunks[], total, received, meta }
 
   /* Typing */
-  typingTimer:  null,
-  lastTypingAt: 0,
-  isTyping:     false,
-  typingPeers:  new Set(),
+  typingTimer:    null,
+  lastTypingAt:   0,
+  isTyping:       false,
+  typingPeers:    new Set(),
 
-  retryCount:   0
+  /* Retry (guest) */
+  retryCount:     0,
+  retryTimer:     null
 };
 
-/* ──────────────────────────────────────────
-   3. DOM
-────────────────────────────────────────── */
+/* ────────────────────────────────────────
+   3. DOM REFERENCES
+──────────────────────────────────────── */
 const $ = id => document.getElementById(id);
 const D = {
-  // Screens
-  sSetup:   $('screen-setup'),
-  sWait:    $('screen-waiting'),
-  sChat:    $('screen-chat'),
-  sError:   $('screen-error'),
-  loading:  $('loading'),
-  loadTxt:  $('loading-txt'),
+  // screens
+  scSetup:  $('sc-setup'),
+  scWait:   $('sc-wait'),
+  scChat:   $('sc-chat'),
+  scError:  $('sc-error'),
+  loader:   $('loader'),
+  loaderTxt:$('loader-txt'),
 
-  // Setup
-  joinBanner:   $('join-banner'),
-  joinRoomId:   $('join-room-id'),
-  nameInput:    $('name-input'),
-  hostOptions:  $('host-options'),
-  approvalToggle: $('approval-toggle'),
-  btnCreate:    $('btn-create-room'),
-  btnJoin:      $('btn-join-room'),
+  // setup
+  joinInfo: $('join-info'),
+  jiRoomId: $('ji-roomid'),
+  inpName:  $('inp-name'),
+  hostOpts: $('host-opts'),
+  chkApproval: $('chk-approval'),
+  btnCreate:   $('btn-create'),
+  btnJoin:     $('btn-join'),
 
-  // Waiting
-  waitName:     $('wait-name-display'),
-  btnCancelWait:$('btn-cancel-wait'),
+  // wait
+  waitName:  $('wait-name'),
+  btnCancel: $('btn-cancel'),
 
-  // Header
-  sdot:         $('sdot'),
-  stext:        $('stext'),
-  btnParticipants: $('btn-participants'),
-  pBadge:       $('p-badge'),
-  btnAudioCall: $('btn-audio-call'),
-  btnVideoCall: $('btn-video-call'),
-  btnDestroy:   $('btn-destroy'),
+  // chat header
+  dot:       $('dot'),
+  stxt:      $('stxt'),
+  btnUsers:  $('btn-users'),
+  ubadge:    $('ubadge'),
+  btnVcall:  $('btn-vcall'),
+  btnVidcall:$('btn-vidcall'),
+  btnDestroy:$('btn-destroy'),
+  btnLeave:  $('btn-leave'),
 
-  // Share banner
-  shareBanner:  $('share-banner'),
-  shareInput:   $('share-link-input'),
-  btnCopy:      $('btn-copy'),
-  btnShare:     $('btn-share'),
+  // share bar
+  shareBar:  $('share-bar'),
+  sbLink:    $('sb-link'),
+  btnCopy:   $('btn-copy'),
+  btnShare:  $('btn-share'),
 
-  // Approval queue
-  aqWrap:       $('approval-queue'),
-  aqName:       $('aq-name'),
-  aqCountRow:   $('aq-count-row'),
-  aqPendingCount: $('aq-pending-count'),
-  btnApprove:   $('btn-approve'),
-  btnReject:    $('btn-reject'),
+  // approval queue
+  aqBar:     $('aq-bar'),
+  aqName:    $('aq-name'),
+  aqMore:    $('aq-more'),
+  aqMoreN:   $('aq-more-n'),
+  btnApprove:$('btn-approve'),
+  btnReject: $('btn-reject'),
 
-  // Video
-  videoArea:    $('video-area'),
-  remoteVid:    $('remote-video'),
-  localVid:     $('local-video'),
-  callPeerInfo: $('call-peer-info'),
-  btnTogMic:    $('btn-tog-mic'),
-  btnTogCam:    $('btn-tog-cam'),
-  btnEndCall:   $('btn-end-call'),
+  // video
+  vidArea:   $('vid-area'),
+  vidRemote: $('vid-remote'),
+  vidLocal:  $('vid-local'),
+  vidLbl:    $('vid-lbl'),
+  btnTmic:   $('btn-tmic'),
+  btnTcam:   $('btn-tcam'),
+  btnEndcall:$('btn-endcall'),
 
-  // Incoming call
-  icOverlay:    $('incoming-call'),
-  icType:       $('ic-type'),
-  icCallerName: $('ic-caller-name'),
-  btnAccept:    $('btn-accept-call'),
-  btnDecline:   $('btn-decline-call'),
+  // messages
+  msgArea:   $('msg-area'),
+  msgList:   $('msg-list'),
+  typing:    $('typing'),
+  typingTxt: $('typing-txt'),
 
-  // Messages
-  msgArea:      $('msg-area'),
-  msgList:      $('msg-list'),
-  typingRow:    $('typing-row'),
-  typingLabel:  $('typing-label'),
+  // progress
+  xfer:      $('xfer'),
+  xferFill:  $('xfer-fill'),
+  xferTxt:   $('xfer-txt'),
 
-  // File progress
-  xferWrap:     $('xfer-wrap'),
-  xferFill:     $('xfer-fill'),
-  xferLabel:    $('xfer-label'),
+  // input
+  inpFile:   $('inp-file'),
+  inpMsg:    $('inp-msg'),
+  btnSend:   $('btn-send'),
 
-  // Input
-  fileInput:    $('file-input'),
-  msgInput:     $('msg-input'),
-  btnSend:      $('btn-send'),
+  // participants panel
+  pp:        $('pp'),
+  ppOv:      $('pp-ov'),
+  ppList:    $('pp-list'),
+  btnPpClose:$('btn-pp-close'),
 
-  // Participants panel
-  pPanel:       $('participants-panel'),
-  panelOverlay: $('panel-overlay'),
-  ppList:       $('pp-list'),
-  btnClosePanel:$('btn-close-panel'),
+  // incoming call
+  incCall:   $('inc-call'),
+  incType:   $('inc-type'),
+  incFrom:   $('inc-from'),
+  btnAccept: $('btn-accept'),
+  btnDecline:$('btn-decline'),
 
-  // Error
-  errTitle:     $('err-title'),
-  errMsg:       $('err-msg'),
+  // error
+  errH:      $('err-h'),
+  errP:      $('err-p'),
 
-  // Modals
+  // modals
   modalDestroy: $('modal-destroy'),
-  mdCancel:     $('md-cancel'),
-  mdConfirm:    $('md-confirm'),
-  modalCallTarget: $('modal-call-target'),
-  ctCallTypeLabel: $('ct-call-type-label'),
-  ctList:       $('ct-list'),
-  ctCancel:     $('ct-cancel')
+  mdNo:  $('md-no'),
+  mdYes: $('md-yes'),
+  modalPick:  $('modal-pick'),
+  pickSub:    $('pick-sub'),
+  pickList:   $('pick-list'),
+  pickCancel: $('pick-cancel'),
+
+  // lightbox
+  lightbox:  $('lightbox'),
+  lbImg:     $('lb-img')
 };
 
-/* ──────────────────────────────────────────
+/* ────────────────────────────────────────
    4. UTILITIES
-────────────────────────────────────────── */
+──────────────────────────────────────── */
 function genId(n = 10) {
   return Array.from(crypto.getRandomValues(new Uint8Array(n)))
     .map(b => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('');
 }
-
 function fmtTime(ts) {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return new Date(ts).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
 }
-
 function fmtBytes(b) {
   if (b < 1024) return b + ' B';
-  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
-  return (b / 1048576).toFixed(1) + ' MB';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(1) + ' MB';
 }
-
-function fileIcon(mime) {
-  if (!mime) return 'fa-file';
-  if (mime.startsWith('image/'))  return 'fa-file-image';
-  if (mime.startsWith('video/'))  return 'fa-file-video';
-  if (mime.startsWith('audio/'))  return 'fa-file-audio';
-  if (mime.includes('pdf'))       return 'fa-file-pdf';
-  if (mime.includes('zip') || mime.includes('rar')) return 'fa-file-zipper';
-  if (mime.includes('word') || mime.includes('document')) return 'fa-file-word';
-  if (mime.includes('sheet') || mime.includes('excel'))   return 'fa-file-excel';
-  if (mime.includes('text'))      return 'fa-file-lines';
+function fileIco(m) {
+  if (!m) return 'fa-file';
+  if (m.startsWith('image/'))  return 'fa-file-image';
+  if (m.startsWith('video/'))  return 'fa-file-video';
+  if (m.startsWith('audio/'))  return 'fa-file-audio';
+  if (m.includes('pdf'))       return 'fa-file-pdf';
+  if (m.includes('zip')||m.includes('rar')) return 'fa-file-zipper';
+  if (m.includes('word')||m.includes('document')) return 'fa-file-word';
+  if (m.includes('sheet')||m.includes('excel'))   return 'fa-file-excel';
+  if (m.includes('text'))      return 'fa-file-lines';
   return 'fa-file';
 }
-
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
-
-function scrollBottom() {
-  D.msgArea.scrollTo({ top: D.msgArea.scrollHeight, behavior: 'smooth' });
-}
-
+function initial(n) { return (n||'?').charAt(0).toUpperCase(); }
+function scrollBot() { D.msgArea.scrollTo({ top:D.msgArea.scrollHeight, behavior:'smooth' }); }
 function ab2b64(buf) {
-  let s = '';
-  new Uint8Array(buf).forEach(b => s += String.fromCharCode(b));
-  return btoa(s);
+  let s=''; new Uint8Array(buf).forEach(b=>s+=String.fromCharCode(b)); return btoa(s);
 }
-
 function b642ab(b64) {
-  const s = atob(b64);
-  const b = new ArrayBuffer(s.length);
-  const v = new Uint8Array(b);
-  for (let i = 0; i < s.length; i++) v[i] = s.charCodeAt(i);
-  return b;
+  const s=atob(b64), b=new ArrayBuffer(s.length), v=new Uint8Array(b);
+  for(let i=0;i<s.length;i++) v[i]=s.charCodeAt(i); return b;
 }
 
-function nameInitial(name) {
-  return (name || '?').charAt(0).toUpperCase();
+/* ────────────────────────────────────────
+   5. CRYPTO (AES-256)
+──────────────────────────────────────── */
+function deriveKey(rid) { return CryptoJS.SHA256('sp2p-v3-' + rid).toString(); }
+function enc(t) {
+  if (!S.encKey) return t;
+  return CryptoJS.AES.encrypt(t, S.encKey).toString();
+}
+function dec(c) {
+  if (!S.encKey) return c;
+  try { return CryptoJS.AES.decrypt(c, S.encKey).toString(CryptoJS.enc.Utf8) || c; }
+  catch { return c; }
 }
 
-/* Get name of a peer by ID */
-function peerName(peerId) {
-  if (peerId === S.peer?.id) return S.myName;
-  const p = S.participants.find(x => x.peerId === peerId);
-  if (p) return p.name;
-  if (S.isHost) return S.guests.get(peerId)?.name || 'Unknown';
-  return 'Unknown';
-}
-
-/* ──────────────────────────────────────────
-   5. CRYPTO
-────────────────────────────────────────── */
-function deriveKey(roomId) {
-  return CryptoJS.SHA256('sp2p-v2-' + roomId).toString();
-}
-
-function encrypt(text) {
-  if (!S.encKey) return text;
-  return CryptoJS.AES.encrypt(text, S.encKey).toString();
-}
-
-function decrypt(cipher) {
-  if (!S.encKey) return cipher;
-  try {
-    const b = CryptoJS.AES.decrypt(cipher, S.encKey);
-    return b.toString(CryptoJS.enc.Utf8) || cipher;
-  } catch { return cipher; }
-}
-
-/* ──────────────────────────────────────────
-   6. STORAGE
-────────────────────────────────────────── */
+/* ────────────────────────────────────────
+   6. STORAGE (auto-prune)
+──────────────────────────────────────── */
 const LS = {
-  k: {
-    role: r => `sp2p_role_${r}`,
-    msgs: r => `sp2p_msgs_${r}`,
-    myId: r => `sp2p_myid_${r}`
-  },
+  km: r => `sp2p_m_${r}`,
+  kr: r => `sp2p_r_${r}`,
+  ki: r => `sp2p_i_${r}`,
 
-  save(msgs) {
+  saveMsgs(msgs) {
     if (!S.roomId) return;
     const pruned = msgs.slice(-CFG.MAX_MSGS);
     try {
-      localStorage.setItem(LS.k.msgs(S.roomId), encrypt(JSON.stringify(pruned)));
-    } catch (e) {
+      localStorage.setItem(LS.km(S.roomId), enc(JSON.stringify(pruned)));
+    } catch(e) {
       if (e.name === 'QuotaExceededError') {
-        try {
-          localStorage.setItem(LS.k.msgs(S.roomId), encrypt(JSON.stringify(msgs.slice(-25))));
-        } catch (_) {
-          localStorage.removeItem(LS.k.msgs(S.roomId));
-        }
+        try { localStorage.setItem(LS.km(S.roomId), enc(JSON.stringify(msgs.slice(-20)))); }
+        catch (_) { localStorage.removeItem(LS.km(S.roomId)); }
       }
     }
   },
-
-  load() {
+  loadMsgs() {
     if (!S.roomId) return [];
-    try {
-      const raw = localStorage.getItem(LS.k.msgs(S.roomId));
-      return raw ? JSON.parse(decrypt(raw)) : [];
-    } catch { return []; }
+    try { const r=localStorage.getItem(LS.km(S.roomId)); return r?JSON.parse(dec(r)):[];} catch{return [];}
   },
-
-  setRole(r) { localStorage.setItem(LS.k.role(S.roomId), r); },
-  getRole()  { return localStorage.getItem(LS.k.role(S.roomId)); },
-  setMyId(id){ localStorage.setItem(LS.k.myId(S.roomId), id); },
-  getMyId()  { return localStorage.getItem(LS.k.myId(S.roomId)); },
-
+  setRole(r)  { localStorage.setItem(LS.kr(S.roomId), r); },
+  getRole()   { return localStorage.getItem(LS.kr(S.roomId)); },
+  setMyId(id) { localStorage.setItem(LS.ki(S.roomId), id); },
+  getMyId()   { return localStorage.getItem(LS.ki(S.roomId)); },
   wipe() {
     if (!S.roomId) return;
-    [LS.k.role, LS.k.msgs, LS.k.myId].forEach(fn => localStorage.removeItem(fn(S.roomId)));
+    [LS.km, LS.kr, LS.ki].forEach(fn => localStorage.removeItem(fn(S.roomId)));
   }
 };
-
 let _msgs = [];
-function addMsg(m) {
-  _msgs.push(m);
-  LS.save(_msgs);
-}
+function addMsg(m) { _msgs.push(m); LS.saveMsgs(_msgs); }
 
-/* ──────────────────────────────────────────
+/* ────────────────────────────────────────
    7. SOUND
-────────────────────────────────────────── */
+──────────────────────────────────────── */
 let _actx = null;
-function beep(freq = 880, dur = 0.12, vol = 0.22, type = 'sine') {
+function beep(freq=880, dur=.12, vol=.2) {
   try {
-    if (!_actx) _actx = new (window.AudioContext || window.webkitAudioContext)();
-    if (_actx.state === 'suspended') _actx.resume();
-    const osc = _actx.createOscillator(), g = _actx.createGain();
-    osc.connect(g); g.connect(_actx.destination);
-    osc.frequency.value = freq; osc.type = type;
-    g.gain.setValueAtTime(vol, _actx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, _actx.currentTime + dur);
-    osc.start(); osc.stop(_actx.currentTime + dur);
-  } catch (_) {}
+    if (!_actx) _actx = new (window.AudioContext||window.webkitAudioContext)();
+    if (_actx.state==='suspended') _actx.resume();
+    const o=_actx.createOscillator(), g=_actx.createGain();
+    o.connect(g); g.connect(_actx.destination);
+    o.frequency.value=freq; g.gain.setValueAtTime(vol,_actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(.001,_actx.currentTime+dur);
+    o.start(); o.stop(_actx.currentTime+dur);
+  } catch(_){}
 }
-function ringBeep() { beep(660, .15, .28); setTimeout(() => beep(880, .15, .28), 200); }
+function ringBeep() { beep(660,.14,.28); setTimeout(()=>beep(880,.14,.28),200); }
 
-/* ──────────────────────────────────────────
+/* ────────────────────────────────────────
    8. TOAST
-────────────────────────────────────────── */
-let _toastT = null;
-function toast(msg, type = '', dur = 2800) {
-  let t = document.querySelector('.toast');
-  if (!t) { t = document.createElement('div'); t.className = 'toast'; document.body.appendChild(t); }
-  t.textContent = msg;
-  t.className = 'toast' + (type ? ' ' + type : '');
-  clearTimeout(_toastT);
-  requestAnimationFrame(() => {
+──────────────────────────────────────── */
+let _tTimer=null;
+function toast(msg, type='', dur=2800) {
+  let t=document.querySelector('.toast');
+  if (!t) { t=document.createElement('div'); t.className='toast'; document.body.appendChild(t); }
+  t.textContent=msg; t.className='toast'+(type?' '+type:'');
+  clearTimeout(_tTimer);
+  requestAnimationFrame(()=>{
     t.classList.add('show');
-    _toastT = setTimeout(() => t.classList.remove('show'), dur);
+    _tTimer=setTimeout(()=>t.classList.remove('show'), dur);
   });
 }
 
-/* ──────────────────────────────────────────
-   9. LOADING / SCREEN
-────────────────────────────────────────── */
-function showLoad(txt = 'Please wait…') {
-  D.loadTxt.textContent = txt;
-  D.loading.style.display = 'flex';
+/* ────────────────────────────────────────
+   9. LOADING / SCREENS
+──────────────────────────────────────── */
+function showLoad(txt='Please wait…') { D.loaderTxt.textContent=txt; D.loader.style.display='flex'; }
+function hideLoad() { D.loader.style.display='none'; }
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  $('sc-'+id)?.classList.add('active');
 }
-function hideLoad() { D.loading.style.display = 'none'; }
+function showError(h, p) { hideLoad(); D.errH.textContent=h; D.errP.textContent=p; showScreen('error'); }
 
-function showScreen(name) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  const el = $('screen-' + name);
-  if (el) el.classList.add('active');
-}
-
-function showError(title, msg) {
-  hideLoad();
-  D.errTitle.textContent = title;
-  D.errMsg.textContent = msg;
-  showScreen('error');
+/* ────────────────────────────────────────
+   10. STATUS BAR
+──────────────────────────────────────── */
+function setStatus(state, txt) {
+  D.dot.className='dot '+state;
+  D.stxt.textContent=txt;
 }
 
-/* ──────────────────────────────────────────
-   10. STATUS
-────────────────────────────────────────── */
-function setStatus(state, text) {
-  D.sdot.className = 'sdot ' + state;
-  D.stext.textContent = text;
-}
-
-/* ──────────────────────────────────────────
+/* ────────────────────────────────────────
    11. RENDER MESSAGES
-────────────────────────────────────────── */
+──────────────────────────────────────── */
 function renderMsg(m) {
-  const isOut = m.fromPeerId === (S.peer?.id);
-
   if (m.type === 'system') {
-    const d = document.createElement('div');
-    d.className = 'msg-sys';
-    d.innerHTML = `<span>${escHtml(m.content)}</span>`;
-    D.msgList.appendChild(d);
-    scrollBottom();
-    return;
+    const d=document.createElement('div'); d.className='msys';
+    d.innerHTML=`<span>${esc(m.content)}</span>`;
+    D.msgList.appendChild(d); scrollBot(); return;
   }
 
+  const isOut = m.from === S.peer?.id;
   const row = document.createElement('div');
-  row.className = 'msg-row ' + (isOut ? 'out' : 'in');
+  row.className = 'mrow ' + (isOut ? 'out' : 'in');
 
-  const name = isOut ? '' : escHtml(m.senderName || peerName(m.fromPeerId) || 'Unknown');
+  const nameHtml = !isOut ? `<div class="mname">${esc(m.senderName || '?')}</div>` : '';
+  const time = `<span class="mtime">${fmtTime(m.ts)}</span>`;
 
   if (m.type === 'text') {
-    row.innerHTML = `
-      ${!isOut ? `<div class="msg-sender-name">${name}</div>` : ''}
-      <div class="msg-bubble">${escHtml(m.content).replace(/\n/g,'<br>')}
-        <span class="msg-time">${fmtTime(m.ts)}</span>
-      </div>`;
-  } else if (m.type === 'image') {
-    row.innerHTML = `
-      ${!isOut ? `<div class="msg-sender-name">${name}</div>` : ''}
-      <div class="msg-bubble" style="padding:.35rem;background:transparent;border:none">
-        <img src="${m.dataUrl}" class="msg-img" alt="${escHtml(m.fileName)}"
-          onclick="openImg('${m.dataUrl}')" loading="lazy">
-        <span class="msg-time" style="padding:0 .2rem">${fmtTime(m.ts)}</span>
-      </div>`;
-  } else if (m.type === 'file') {
-    row.innerHTML = `
-      ${!isOut ? `<div class="msg-sender-name">${name}</div>` : ''}
-      <div class="msg-bubble">
-        <div class="file-card" onclick="dlFile('${m.dataUrl}','${escHtml(m.fileName)}')">
-          <i class="fas ${fileIcon(m.mimeType)} fi-icon"></i>
-          <div class="fi-info">
-            <div class="fi-name">${escHtml(m.fileName)}</div>
-            <div class="fi-size">${fmtBytes(m.fileSize)} · tap to download</div>
-          </div>
-          <i class="fas fa-download" style="color:var(--muted);font-size:.75rem"></i>
-        </div>
-        <span class="msg-time">${fmtTime(m.ts)}</span>
-      </div>`;
+    row.innerHTML = nameHtml +
+      `<div class="mbub">${esc(m.content).replace(/\n/g,'<br>')}${time}</div>`;
   }
-
-  D.msgList.appendChild(row);
-  scrollBottom();
-}
-
-window.openImg = src => { const w = window.open(); w && w.document.write(`<img src="${src}" style="max-width:100%;background:#111">`); };
-window.dlFile  = (url, name) => { if (!url) return; const a = document.createElement('a'); a.href = url; a.download = name; a.click(); };
-
-/* Append system message (not persisted) */
-function sysMsg(txt) {
-  renderMsg({ type: 'system', content: txt, ts: Date.now() });
-}
-
-/* ──────────────────────────────────────────
-   12. PARTICIPANTS PANEL
-────────────────────────────────────────── */
-function buildParticipants() {
-  const list = S.participants;
-  D.pBadge.textContent = list.length;
-  D.pBadge.style.display = list.length > 0 ? 'flex' : 'none';
-
-  D.ppList.innerHTML = '';
-  list.forEach(p => {
-    const isSelf = p.peerId === S.peer?.id;
-    const isHostP = p.isHost;
-    const div = document.createElement('div');
-    div.className = 'p-item';
-    div.innerHTML = `
-      <div class="p-avi">${nameInitial(p.name)}</div>
-      <div class="p-info">
-        <div class="p-name">${escHtml(p.name)}${isSelf ? ' <span style="color:var(--muted);font-size:.65rem">(You)</span>' : ''}</div>
-        <div class="p-role">${isHostP ? '👑 Host' : 'Participant'}</div>
-      </div>
-      <div class="p-actions">
-        ${!isSelf ? `<button class="p-action-btn" title="Voice Call" onclick="callPeer('${p.peerId}',false)"><i class="fas fa-phone"></i></button>
-                    <button class="p-action-btn" title="Video Call" onclick="callPeer('${p.peerId}',true)"><i class="fas fa-video"></i></button>` : ''}
-        ${S.isHost && !isSelf ? `<button class="p-action-btn kick" title="Remove" onclick="kickPeer('${p.peerId}')"><i class="fas fa-user-minus"></i></button>` : ''}
-      </div>`;
-    D.ppList.appendChild(div);
-  });
-
-  // Enable/disable call buttons in header
-  const canCall = list.filter(p => p.peerId !== S.peer?.id).length > 0;
-  D.btnAudioCall.disabled = !canCall;
-  D.btnVideoCall.disabled = !canCall;
-}
-
-function openPanel() {
-  D.pPanel.classList.add('open');
-  D.panelOverlay.style.display = 'block';
-}
-function closePanel() {
-  D.pPanel.classList.remove('open');
-  D.panelOverlay.style.display = 'none';
-}
-
-window.callPeer = (peerId, videoEnabled) => {
-  closePanel();
-  startCallToPeer(peerId, videoEnabled);
-};
-
-window.kickPeer = (peerId) => {
-  if (!S.isHost) return;
-  const g = S.guests.get(peerId);
-  if (!g) return;
-  try { g.conn.send(JSON.stringify({ type: 'kicked' })); } catch (_) {}
-  setTimeout(() => {
-    try { g.conn.close(); } catch (_) {}
-    removeParticipant(peerId);
-  }, 300);
-  toast(`${g.name} was removed.`, 'warn');
-};
-
-/* ──────────────────────────────────────────
-   13. APPROVAL QUEUE
-────────────────────────────────────────── */
-function enqueueApproval(peerId, name, conn) {
-  S.aqQueue.push({ peerId, name, conn });
-  if (!S.aqShowing) showNextApproval();
-}
-
-function showNextApproval() {
-  if (S.aqQueue.length === 0) {
-    D.aqWrap.style.display = 'none';
-    S.aqShowing = false;
-    return;
+  else if (m.type === 'image') {
+    row.innerHTML = nameHtml +
+      `<div class="mbub" style="padding:.32rem;background:transparent;border:none">
+        <img src="${m.url}" class="mimg" alt="${esc(m.name)}" loading="lazy"
+          onclick="openLB('${m.url}')">
+        ${time}
+       </div>`;
   }
-  S.aqShowing = true;
-  const next = S.aqQueue[0];
-  D.aqName.textContent = next.name;
-  D.aqWrap.style.display = 'block';
-  // Show count of remaining
-  const waiting = S.aqQueue.length - 1;
-  if (waiting > 0) {
-    D.aqCountRow.style.display = 'flex';
-    D.aqPendingCount.textContent = waiting;
-  } else {
-    D.aqCountRow.style.display = 'none';
+  else if (m.type === 'file') {
+    row.innerHTML = nameHtml +
+      `<div class="mbub">
+        <div class="fcard" onclick="dlFile('${m.url||''}','${esc(m.name)}')">
+          <i class="fas ${fileIco(m.mime)} fic"></i>
+          <div class="fi"><div class="fn">${esc(m.name)}</div><div class="fs">${fmtBytes(m.size)} · tap to save</div></div>
+          <i class="fas fa-download" style="color:var(--t3);font-size:.72rem"></i>
+        </div>${time}
+       </div>`;
   }
-  beep(880, .08, .2);
+  D.msgList.appendChild(row); scrollBot();
 }
 
-function processApproval(approved) {
-  if (S.aqQueue.length === 0) return;
-  const req = S.aqQueue.shift();
-  const { peerId, name, conn } = req;
+function sysMsg(txt) { renderMsg({ type:'system', content:txt, ts:Date.now() }); }
 
-  if (approved) {
-    // Mark as approved
-    const guest = S.guests.get(peerId);
-    if (guest) {
-      guest.approved = true;
-      guest.name = name;
-    }
-    // Send approval + current participants list
-    const pList = buildParticipantsList();
-    try {
-      conn.send(JSON.stringify({
-        type: 'approved',
-        hostName: S.myName,
-        participants: pList
-      }));
-    } catch (_) {}
+window.openLB = src => { D.lbImg.src=src; D.lightbox.style.display='flex'; };
+window.closeLB = ()  => { D.lightbox.style.display='none'; D.lbImg.src=''; };
+window.dlFile  = (url,name) => { if(!url)return; const a=document.createElement('a');a.href=url;a.download=name;a.click(); };
 
-    // Add to participants
-    addParticipant({ peerId, name, isHost: false });
+/* ────────────────────────────────────────
+   12. SEND DATA — KEY FIX
+   ─────────────────────────────────────
+   PeerJS v1.x with DEFAULT serialization:
+   conn.send(object) → other side receives object (no parse needed)
+   conn.send(string) → other side receives the same string
+   
+   WRONG PATTERN (v2.0 bug):
+     conn.send(JSON.stringify(obj)) + JSON.parse(raw)
+     ↑ This double-encodes or loses data depending on PeerJS version
+   
+   CORRECT PATTERN (v3.0 fix):
+     conn.send(obj) → received as obj directly
+──────────────────────────────────────── */
 
-    // Broadcast new participant to existing guests
-    broadcastToGuests({
-      type: 'peer_joined',
-      peerId,
-      name
-    }, peerId);
-
-    sysMsg(`${name} joined the room`);
-    toast(`✅ ${name} joined`, 'ok');
-    beep(660, .12, .2);
-  } else {
-    // Reject
-    try { conn.send(JSON.stringify({ type: 'rejected', reason: 'Host declined your request.' })); } catch (_) {}
-    S.guests.delete(peerId);
-    toast(`❌ ${name} was rejected`, '');
-  }
-
-  showNextApproval();
-}
-
-/* ──────────────────────────────────────────
-   14. PARTICIPANT LIST MANAGEMENT
-────────────────────────────────────────── */
-function buildParticipantsList() {
-  // Returns array of all current approved participants
-  const list = [{ peerId: S.peer.id, name: S.myName, isHost: S.isHost }];
-  if (S.isHost) {
-    S.guests.forEach((g, pid) => {
-      if (g.approved) list.push({ peerId: pid, name: g.name, isHost: false });
-    });
-  }
-  return list;
-}
-
-function addParticipant(p) {
-  if (!S.participants.find(x => x.peerId === p.peerId)) {
-    S.participants.push(p);
-  }
-  buildParticipants();
-}
-
-function removeParticipant(peerId) {
-  S.participants = S.participants.filter(p => p.peerId !== peerId);
-  S.guests.delete(peerId);
-  buildParticipants();
-}
-
-/* ──────────────────────────────────────────
-   15. MESSAGING — HOST RELAY
-────────────────────────────────────────── */
-
-/* Broadcast raw JSON string to all approved guests, optionally excluding one */
-function broadcastToGuests(obj, excludePeerId = null) {
-  const str = JSON.stringify(obj);
+/* Send to ALL approved guests (host) */
+function broadcast(obj, skipPeer=null) {
   S.guests.forEach((g, pid) => {
-    if (g.approved && g.conn.open && pid !== excludePeerId) {
-      try { g.conn.send(str); } catch (_) {}
+    if (g.approved && g.conn?.open && pid !== skipPeer) {
+      try { g.conn.send(obj); } catch(_) {}
     }
   });
 }
 
-/* Send a message as host (to all guests) */
-function hostSendMsg(content) {
-  const msg = {
-    type: 'text',
-    id:   genId(12),
-    fromPeerId:  S.peer.id,
-    senderName:  S.myName,
-    content:     encrypt(content),
-    ts:          Date.now()
-  };
-  broadcastToGuests({ type: 'msg_relay', ...msg });
-  renderMsg({ ...msg, content }); // show plaintext locally
-  addMsg({ ...msg, content });
+/* Send to host (guest) */
+function toHost(obj) {
+  if (S.hostConn?.open) {
+    try { S.hostConn.send(obj); } catch(_) { toast('Send failed.','err'); }
+  }
 }
 
-/* Guest sends message to host */
-function guestSendMsg(content) {
-  if (!S.hostConn?.open) return;
+/* ────────────────────────────────────────
+   13. TEXT MESSAGING
+──────────────────────────────────────── */
+function sendText() {
+  const text = D.inpMsg.value.trim();
+  if (!text) return;
+  D.inpMsg.value = '';
+  D.inpMsg.style.height = 'auto';
+  clearTimeout(S.typingTimer);
+  S.isTyping = false;
+  sendTyping(false);
+
   const msg = {
     type: 'msg',
     id:   genId(12),
-    fromPeerId: S.peer.id,
+    from: S.peer.id,
     senderName: S.myName,
-    content: encrypt(content),
+    content: enc(text),
     ts: Date.now()
   };
-  try {
-    S.hostConn.send(JSON.stringify(msg));
-    renderMsg({ ...msg, content });  // show locally
-    addMsg({ ...msg, content });
-  } catch (_) { toast('Send failed.', 'err'); }
-}
 
-function sendTextMessage() {
-  const text = D.msgInput.value.trim();
-  if (!text) return;
-  D.msgInput.value = '';
-  D.msgInput.style.height = 'auto';
-  clearTimeout(S.typingTimer);
-  S.isTyping = false;
-  sendTypingSignal(false);
-  if (S.isHost) hostSendMsg(text);
-  else guestSendMsg(text);
-}
-
-/* ──────────────────────────────────────────
-   16. TYPING INDICATOR
-────────────────────────────────────────── */
-function sendTypingSignal(active) {
-  const obj = JSON.stringify({ type: 'typing', active, fromPeerId: S.peer.id, senderName: S.myName });
   if (S.isHost) {
-    broadcastToGuests({ type: 'typing_relay', active, fromPeerId: S.peer.id, senderName: S.myName });
+    /* Host → broadcast to all guests */
+    broadcast(msg);
+    /* Show locally (decrypt for own view) */
+    renderMsg({ ...msg, content: text });
+    addMsg({ ...msg, content: text });
   } else {
-    if (S.hostConn?.open) try { S.hostConn.send(obj); } catch (_) {}
+    /* Guest → send to host (host will relay) */
+    toHost(msg);
+    /* Show locally */
+    renderMsg({ ...msg, content: text });
+    addMsg({ ...msg, content: text });
   }
+}
+
+/* ────────────────────────────────────────
+   14. TYPING INDICATOR
+──────────────────────────────────────── */
+function sendTyping(active) {
+  const obj = { type:'typing', from:S.peer.id, senderName:S.myName, active };
+  if (S.isHost) broadcast(obj);
+  else toHost(obj);
 }
 
 function onTypingInput() {
+  if (D.inpMsg.disabled) return;
   const now = Date.now();
-  if (!S.isTyping || now - S.lastTypingAt > CFG.TYPING_SEND) {
-    S.isTyping = true;
-    S.lastTypingAt = now;
-    sendTypingSignal(true);
+  if (!S.isTyping || now - S.lastTypingAt > CFG.TYPING_GAP) {
+    S.isTyping = true; S.lastTypingAt = now; sendTyping(true);
   }
   clearTimeout(S.typingTimer);
-  S.typingTimer = setTimeout(() => { S.isTyping = false; sendTypingSignal(false); }, CFG.TYPING_STOP);
+  S.typingTimer = setTimeout(()=>{ S.isTyping=false; sendTyping(false); }, CFG.TYPING_STOP);
+}
+
+function setTypingPeer(peerId, name, active) {
+  if (active) S.typingPeers.add(peerId+':'+name);
+  else S.typingPeers.forEach(k=>{ if(k.startsWith(peerId+':')) S.typingPeers.delete(k); });
+  updateTypingUI();
 }
 
 function updateTypingUI() {
-  const names = [];
-  S.typingPeers.forEach(pid => {
-    const p = S.participants.find(x => x.peerId === pid);
-    names.push(p?.name || 'Someone');
-  });
-  if (names.length === 0) {
-    D.typingRow.style.display = 'none';
-  } else {
-    D.typingRow.style.display = 'flex';
-    D.typingLabel.textContent = names.join(', ') + (names.length === 1 ? ' is typing…' : ' are typing…');
-    scrollBottom();
+  if (S.typingPeers.size === 0) { D.typing.style.display='none'; return; }
+  const names = [...S.typingPeers].map(k=>k.split(':').slice(1).join(':'));
+  D.typing.style.display='flex';
+  D.typingTxt.textContent = names.join(', ') + (names.length===1?' is typing…':' are typing…');
+  scrollBot();
+}
+
+/* ────────────────────────────────────────
+   15. FILE SHARING (16 KB chunks)
+──────────────────────────────────────── */
+async function sendFile(file) {
+  if (file.size > 150*1024*1024) { toast('Max file size: 150 MB','err'); return; }
+  const fileId = genId(12);
+  const buf = await file.arrayBuffer();
+  const total = Math.ceil(buf.byteLength / CFG.CHUNK_SIZE);
+
+  D.xfer.style.display='flex'; D.xferFill.style.width='0%';
+  D.xferTxt.textContent=`Sending 0%`;
+
+  for (let i=0; i<total; i++) {
+    const start = i * CFG.CHUNK_SIZE;
+    const pkt = {
+      type:'chunk', fileId, idx:i, total,
+      name:file.name, mime:file.type, size:buf.byteLength,
+      from:S.peer.id, senderName:S.myName,
+      data: ab2b64(buf.slice(start, start+CFG.CHUNK_SIZE))
+    };
+    if (S.isHost) broadcast(pkt);
+    else toHost(pkt);
+
+    const pct = Math.round(((i+1)/total)*100);
+    D.xferFill.style.width=pct+'%';
+    D.xferTxt.textContent=`Sending ${pct}%`;
+    if (i%10===9) await new Promise(r=>setTimeout(r,0));
+  }
+  setTimeout(()=>{ D.xfer.style.display='none'; }, 700);
+
+  /* Show own preview */
+  const url = URL.createObjectURL(new Blob([buf],{type:file.type}));
+  const m = { type:file.type.startsWith('image/')?'image':'file',
+    id:fileId, name:file.name, mime:file.type, size:buf.byteLength,
+    url, from:S.peer.id, senderName:S.myName, ts:Date.now() };
+  renderMsg(m); addMsg({...m, url:''});
+}
+
+function recvChunk(pkt) {
+  const { fileId, idx, total, name, mime, size, from, senderName, data } = pkt;
+  if (!S.incoming[fileId]) {
+    S.incoming[fileId] = { chunks:new Array(total).fill(null), total, rcv:0, name, mime, size, from, senderName };
+  }
+  const fi = S.incoming[fileId];
+  if (fi.chunks[idx] !== null) return; // deduplicate
+  fi.chunks[idx] = b642ab(data); fi.rcv++;
+
+  const pct = Math.round((fi.rcv/fi.total)*100);
+  D.xfer.style.display='flex'; D.xferFill.style.width=pct+'%';
+  D.xferTxt.textContent=`Receiving ${pct}%`;
+
+  if (fi.rcv === fi.total) {
+    const url = URL.createObjectURL(new Blob(fi.chunks,{type:fi.mime}));
+    delete S.incoming[fileId];
+    setTimeout(()=>{ D.xfer.style.display='none'; },700);
+    beep(1100,.08,.18);
+    const m = { type:fi.mime.startsWith('image/')?'image':'file',
+      id:fileId, name:fi.name, mime:fi.mime, size:fi.size,
+      url, from:fi.from, senderName:fi.senderName, ts:Date.now() };
+    renderMsg(m); addMsg({...m, url:''});
   }
 }
 
-/* ──────────────────────────────────────────
-   17. FILE SHARING — CHUNKED
-────────────────────────────────────────── */
-function sendFileToAll(file) {
-  if (file.size > 150 * 1024 * 1024) { toast('Max file size is 150 MB.', 'err'); return; }
-  const fileId = genId(12);
-  const reader = new FileReader();
-  reader.onload = async e => {
-    const buf = e.target.result;
-    const total = Math.ceil(buf.byteLength / CFG.CHUNK_SIZE);
-    D.xferWrap.style.display = 'flex';
-    D.xferFill.style.width = '0%';
-    D.xferLabel.textContent = `Sending "${file.name}"… 0%`;
+/* ────────────────────────────────────────
+   16. DATA ROUTER — handles all incoming objects
+──────────────────────────────────────── */
+function handleData(data, fromPeerId) {
+  if (!data || !data.type) return;
 
-    for (let i = 0; i < total; i++) {
-      const start = i * CFG.CHUNK_SIZE;
-      const chunk = ab2b64(buf.slice(start, start + CFG.CHUNK_SIZE));
-      const pkt = {
-        type: 'file_chunk',
-        fileId, index: i, total,
-        name: file.name, mimeType: file.type, size: buf.byteLength, chunk
-      };
-      const str = JSON.stringify(pkt);
-      try {
-        if (S.isHost) broadcastToGuests(JSON.parse(str));
-        else if (S.hostConn?.open) S.hostConn.send(str);
-      } catch { D.xferWrap.style.display = 'none'; toast('File send failed.', 'err'); return; }
+  switch (data.type) {
 
-      const pct = Math.round(((i + 1) / total) * 100);
-      D.xferFill.style.width = pct + '%';
-      D.xferLabel.textContent = `Sending "${file.name}"… ${pct}%`;
-      if (i % 10 === 9) await new Promise(r => setTimeout(r, 0));
+    /* ── Text message ── */
+    case 'msg': {
+      const plain = dec(data.content);
+      if (S.isHost) {
+        const guest = S.guests.get(fromPeerId);
+        if (!guest?.approved) return;
+        /* Show on host's screen */
+        renderMsg({ ...data, content:plain });
+        addMsg({ ...data, content:plain });
+        beep(880,.07,.18);
+        /* Relay to all other approved guests */
+        broadcast({ ...data }, fromPeerId);
+      } else {
+        /* Guest receives relay from host (from field = original sender) */
+        renderMsg({ ...data, content:plain });
+        addMsg({ ...data, content:plain });
+        beep(880,.07,.18);
+      }
+      break;
     }
 
-    setTimeout(() => { D.xferWrap.style.display = 'none'; }, 800);
-
-    const blob = new Blob([buf], { type: file.type });
-    const dataUrl = URL.createObjectURL(blob);
-    const msgObj = {
-      type: file.type.startsWith('image/') ? 'image' : 'file',
-      id: fileId, fileName: file.name, mimeType: file.type,
-      fileSize: file.size, dataUrl,
-      fromPeerId: S.peer.id, senderName: S.myName,
-      ts: Date.now()
-    };
-    renderMsg(msgObj);
-    addMsg({ ...msgObj, dataUrl: '' });
-  };
-  reader.readAsArrayBuffer(file);
-}
-
-function receiveChunk(pkt) {
-  const { fileId, index, total, name, mimeType, size, chunk, fromPeerId, senderName } = pkt;
-  if (!S.fileIncoming[fileId]) {
-    S.fileIncoming[fileId] = { chunks: new Array(total).fill(null), total, received: 0, name, mimeType, size, fromPeerId, senderName };
-  }
-  const fi = S.fileIncoming[fileId];
-  fi.chunks[index] = b642ab(chunk);
-  fi.received++;
-
-  const pct = Math.round((fi.received / fi.total) * 100);
-  D.xferWrap.style.display = 'flex';
-  D.xferFill.style.width = pct + '%';
-  D.xferLabel.textContent = `Receiving "${name}"… ${pct}%`;
-
-  if (fi.received === fi.total) {
-    const dataUrl = URL.createObjectURL(new Blob(fi.chunks, { type: fi.mimeType }));
-    delete S.fileIncoming[fileId];
-    setTimeout(() => { D.xferWrap.style.display = 'none'; }, 800);
-    beep(1100, .08, .18);
-    const msgObj = {
-      type: fi.mimeType.startsWith('image/') ? 'image' : 'file',
-      id: fileId, fileName: fi.name, mimeType: fi.mimeType,
-      fileSize: fi.size, dataUrl,
-      fromPeerId: fi.fromPeerId || 'unknown',
-      senderName: fi.senderName || peerName(fi.fromPeerId),
-      ts: Date.now()
-    };
-    renderMsg(msgObj);
-    addMsg({ ...msgObj, dataUrl: '' });
-  }
-}
-
-/* ──────────────────────────────────────────
-   18. DATA HANDLER — HOST
-────────────────────────────────────────── */
-function onHostData(fromPeerId, raw) {
-  let data;
-  try { data = JSON.parse(raw); } catch { return; }
-
-  const guest = S.guests.get(fromPeerId);
-
-  switch (data.type) {
-    case 'join_request':
-      if (!guest) return;
-      if (S.requireApproval) {
-        enqueueApproval(fromPeerId, data.name, guest.conn);
+    /* ── Typing ── */
+    case 'typing': {
+      if (S.isHost) {
+        const guest = S.guests.get(fromPeerId);
+        if (!guest?.approved) return;
+        setTypingPeer(data.from, data.senderName, data.active);
+        /* Relay to other guests */
+        broadcast(data, fromPeerId);
       } else {
-        // Auto-approve
-        guest.approved = true;
-        guest.name = data.name;
-        const pList = buildParticipantsList();
-        try { guest.conn.send(JSON.stringify({ type: 'approved', hostName: S.myName, participants: pList })); } catch (_) {}
-        addParticipant({ peerId: fromPeerId, name: data.name, isHost: false });
-        broadcastToGuests({ type: 'peer_joined', peerId: fromPeerId, name: data.name }, fromPeerId);
-        sysMsg(`${data.name} joined the room`);
-        toast(`✅ ${data.name} joined`, 'ok');
-        beep(660, .12, .2);
+        /* Guest — from field = original typer */
+        if (data.from !== S.peer.id) setTypingPeer(data.from, data.senderName, data.active);
       }
       break;
+    }
 
-    case 'msg':
-      if (!guest?.approved) return;
-      const plain = decrypt(data.content);
-      // Show in host's UI
-      renderMsg({ type: 'text', id: data.id, content: plain, fromPeerId, senderName: guest.name, ts: data.ts });
-      addMsg({ type: 'text', id: data.id, content: plain, fromPeerId, senderName: guest.name, ts: data.ts });
-      beep(880, .07, .18);
-      // Relay to all other guests
-      broadcastToGuests({ type: 'msg_relay', id: data.id, content: data.content, fromPeerId, senderName: guest.name, ts: data.ts }, fromPeerId);
+    /* ── File chunk ── */
+    case 'chunk': {
+      if (S.isHost) {
+        const guest = S.guests.get(fromPeerId);
+        if (!guest?.approved) return;
+        recvChunk(data);
+        /* Relay to other guests */
+        broadcast(data, fromPeerId);
+      } else {
+        /* Guest receives relayed chunk */
+        if (data.from !== S.peer.id) recvChunk(data);
+      }
       break;
+    }
 
-    case 'typing':
-      if (!guest?.approved) return;
-      // Relay to other guests
-      broadcastToGuests({ type: 'typing_relay', active: data.active, fromPeerId, senderName: guest.name }, fromPeerId);
-      if (data.active) { S.typingPeers.add(fromPeerId); } else { S.typingPeers.delete(fromPeerId); }
-      updateTypingUI();
+    /* ── Guest join request ── */
+    case 'join_req': {
+      if (!S.isHost) return;
+      const guest = S.guests.get(fromPeerId);
+      if (!guest) return;
+      guest.name = data.name;
+      if (S.requireApproval) {
+        S.aqQueue.push({ peerId:fromPeerId, name:data.name, conn:guest.conn });
+        if (!S.aqActive) showNextAQ();
+      } else {
+        approveGuest(fromPeerId, data.name, guest.conn);
+      }
       break;
+    }
 
-    case 'file_chunk':
-      if (!guest?.approved) return;
-      // Add sender info and relay
-      const relayPkt = { ...data, fromPeerId, senderName: guest.name };
-      broadcastToGuests(relayPkt, fromPeerId);
-      receiveChunk(relayPkt);
-      break;
-
-    case 'call_type':
-      // Guest is about to call someone directly — no relay needed (direct P2P call)
-      break;
-  }
-}
-
-/* ──────────────────────────────────────────
-   19. DATA HANDLER — GUEST
-────────────────────────────────────────── */
-function onGuestData(raw) {
-  let data;
-  try { data = JSON.parse(raw); } catch { return; }
-
-  switch (data.type) {
-    case 'approved':
-      // We're in! Build participant list and enter chat
+    /* ── Host approved (guest receives) ── */
+    case 'approved': {
+      if (S.isHost) return;
+      /* Build participant list from host's data */
       S.participants = data.participants || [];
-      // Make sure we're in the list
-      if (!S.participants.find(p => p.peerId === S.peer.id)) {
-        S.participants.push({ peerId: S.peer.id, name: S.myName, isHost: false });
+      /* Ensure self is in list */
+      if (!S.participants.find(p=>p.peerId===S.peer.id)) {
+        S.participants.push({ peerId:S.peer.id, name:S.myName, isHost:false });
       }
-      hideLoad();
-      showScreen('chat');
-      enableChat();
-      buildParticipants();
-      setStatus('connected', 'Connected · ' + (S.participants.length) + ' online');
-      // Load history
-      _msgs = LS.load();
-      _msgs.forEach(renderMsg);
-      sysMsg(`You joined the room (${S.participants.length} online)`);
-      toast('🔒 Joined secure room!', 'ok');
-      beep(660, .12, .2);
+      onEnteredRoom();
       break;
+    }
 
-    case 'rejected':
+    /* ── Host rejected (guest receives) ── */
+    case 'rejected': {
+      if (S.isHost) return;
       hideLoad();
       showError('Request Rejected', data.reason || 'The host declined your join request.');
       break;
+    }
 
-    case 'kicked':
-      showError('Removed', 'You were removed from the room by the host.');
-      cleanupAll();
+    /* ── Kicked (guest receives) ── */
+    case 'kicked': {
+      if (S.isHost) return;
+      cleanAll();
+      showError('Removed from Room', 'You were removed by the host.');
       break;
+    }
 
-    case 'room_full':
+    /* ── Room full signal ── */
+    case 'room_full': {
+      if (S.isHost) return;
       hideLoad();
-      showError('Room Full', 'Could not join: the host\'s room is unavailable.');
+      showError('Room Full', 'Could not join: this room has reached its limit.');
       break;
+    }
 
-    case 'msg_relay':
-      const plain = decrypt(data.content);
-      renderMsg({ type: 'text', id: data.id, content: plain, fromPeerId: data.fromPeerId, senderName: data.senderName, ts: data.ts });
-      addMsg({ type: 'text', id: data.id, content: plain, fromPeerId: data.fromPeerId, senderName: data.senderName, ts: data.ts });
-      beep(880, .07, .18);
-      break;
-
-    case 'typing_relay':
-      if (data.active) { S.typingPeers.add(data.fromPeerId); } else { S.typingPeers.delete(data.fromPeerId); }
-      updateTypingUI();
-      break;
-
-    case 'file_chunk':
-      receiveChunk(data);
-      break;
-
-    case 'peer_joined':
-      if (!S.participants.find(p => p.peerId === data.peerId)) {
-        S.participants.push({ peerId: data.peerId, name: data.name, isHost: false });
+    /* ── Peer joined broadcast (guests receive) ── */
+    case 'peer_in': {
+      if (S.isHost) return;
+      if (!S.participants.find(p=>p.peerId===data.peerId)) {
+        S.participants.push({ peerId:data.peerId, name:data.name, isHost:false });
       }
-      buildParticipants();
-      setStatus('connected', 'Connected · ' + S.participants.length + ' online');
+      refreshParticipants();
       sysMsg(`${data.name} joined`);
       break;
+    }
 
-    case 'peer_left':
-      removeParticipant(data.peerId);
-      setStatus('connected', 'Connected · ' + S.participants.length + ' online');
+    /* ── Peer left broadcast (guests receive) ── */
+    case 'peer_out': {
+      if (S.isHost) return;
+      S.participants = S.participants.filter(p=>p.peerId!==data.peerId);
+      refreshParticipants();
       sysMsg(`${data.name} left`);
       break;
+    }
+
+    /* ── Host closed room ── */
+    case 'room_closed': {
+      if (S.isHost) return;
+      cleanAll();
+      showError('Room Closed', 'The host has closed this room.');
+      break;
+    }
   }
 }
 
-/* ──────────────────────────────────────────
-   20. CONNECTION SETUP
-────────────────────────────────────────── */
+/* ────────────────────────────────────────
+   17. APPROVAL QUEUE
+──────────────────────────────────────── */
+function showNextAQ() {
+  if (S.aqQueue.length === 0) { D.aqBar.style.display='none'; S.aqActive=false; return; }
+  S.aqActive = true;
+  const next = S.aqQueue[0];
+  D.aqName.textContent = next.name;
+  D.aqBar.style.display = 'block';
+  const waiting = S.aqQueue.length - 1;
+  D.aqMore.style.display = waiting > 0 ? 'flex' : 'none';
+  D.aqMoreN.textContent = waiting;
+  beep(880,.07,.18);
+}
 
-/* Host accepts incoming connection */
-function handleIncomingConnection(conn) {
-  const peerId = conn.peer;
+function processAQ(approved) {
+  if (S.aqQueue.length === 0) return;
+  const req = S.aqQueue.shift();
+  if (approved) {
+    approveGuest(req.peerId, req.name, req.conn);
+  } else {
+    try { req.conn.send({ type:'rejected', reason:'The host declined your request.' }); } catch(_) {}
+    S.guests.delete(req.peerId);
+    toast(`${req.name} was rejected`,'');
+  }
+  showNextAQ();
+}
 
-  // Store connection (not yet approved)
-  S.guests.set(peerId, { conn, name: '?', approved: false });
+function approveGuest(peerId, name, conn) {
+  const guest = S.guests.get(peerId);
+  if (!guest) return;
+  guest.approved = true;
+  guest.name = name;
 
-  conn.on('open', () => {
-    // Waiting for join_request message
+  /* Build full participant list to send */
+  const pList = buildPList();
+
+  /* Notify guest they're approved */
+  try { conn.send({ type:'approved', participants:pList }); } catch(_) {}
+
+  /* Add to host's own participant list */
+  if (!S.participants.find(p=>p.peerId===peerId)) {
+    S.participants.push({ peerId, name, isHost:false });
+  }
+  refreshParticipants();
+
+  /* Notify ALL other guests about new member */
+  broadcast({ type:'peer_in', peerId, name }, peerId);
+
+  sysMsg(`${name} joined`);
+  toast(`✅ ${name} joined`,'ok');
+  beep(660,.12,.2);
+}
+
+function buildPList() {
+  const list = [{ peerId:S.peer.id, name:S.myName, isHost:true }];
+  S.guests.forEach((g,pid)=>{ if(g.approved) list.push({peerId:pid,name:g.name,isHost:false}); });
+  return list;
+}
+
+/* ────────────────────────────────────────
+   18. PARTICIPANTS PANEL
+──────────────────────────────────────── */
+function refreshParticipants() {
+  const cnt = S.participants.length;
+  D.ubadge.textContent = cnt;
+
+  D.ppList.innerHTML = '';
+  S.participants.forEach(p => {
+    const isSelf = p.peerId === S.peer?.id;
+    const row = document.createElement('div');
+    row.className = 'pitem';
+    row.innerHTML = `
+      <div class="pav">${initial(p.name)}</div>
+      <div class="pinfo">
+        <div class="pname">${esc(p.name)}${isSelf?'<span style="font-size:.6rem;color:var(--t3);margin-left:.3rem">(You)</span>':''}</div>
+        <div class="prole">${p.isHost?'👑 Host':'Participant'}</div>
+      </div>
+      <div class="pacts">
+        ${!isSelf?`
+          <button class="pact" title="Voice call" onclick="callPeer('${p.peerId}',false)"><i class="fas fa-phone"></i></button>
+          <button class="pact" title="Video call" onclick="callPeer('${p.peerId}',true)"><i class="fas fa-video"></i></button>
+        `:''}
+        ${S.isHost && !isSelf?`<button class="pact kick" title="Remove" onclick="kickPeer('${p.peerId}')"><i class="fas fa-user-minus"></i></button>`:''}
+      </div>`;
+    D.ppList.appendChild(row);
   });
 
-  conn.on('data', raw => onHostData(peerId, raw));
+  /* Enable call buttons if there are other participants */
+  const hasOthers = S.participants.filter(p=>p.peerId!==S.peer?.id).length > 0;
+  D.btnVcall.disabled   = !hasOthers;
+  D.btnVidcall.disabled = !hasOthers;
+}
+
+window.callPeer = (pid, video) => { closePanel(); startCallTo(pid, video); };
+window.kickPeer = pid => {
+  if (!S.isHost) return;
+  const g = S.guests.get(pid);
+  if (!g) return;
+  try { g.conn.send({ type:'kicked' }); } catch(_) {}
+  setTimeout(()=>{
+    try { g.conn.close(); } catch(_) {}
+    S.participants = S.participants.filter(p=>p.peerId!==pid);
+    S.guests.delete(pid);
+    broadcast({ type:'peer_out', peerId:pid, name:g.name });
+    refreshParticipants();
+    sysMsg(`${g.name} was removed`);
+    toast(`${g.name} removed`,'warn');
+  }, 300);
+};
+
+function openPanel()  { D.pp.classList.add('open'); D.ppOv.style.display='block'; }
+function closePanel() { D.pp.classList.remove('open'); D.ppOv.style.display='none'; }
+
+/* ────────────────────────────────────────
+   19. INCOMING CONNECTION HANDLER (Host)
+──────────────────────────────────────── */
+function onIncomingConn(conn) {
+  const pid = conn.peer;
+
+  if (S.guests.has(pid)) {
+    /* Reconnect — reuse existing slot */
+    const g = S.guests.get(pid);
+    g.conn = conn;
+  } else {
+    S.guests.set(pid, { conn, name:'?', approved:false });
+  }
+
+  conn.on('open', () => {
+    /* Wait for join_req — no action needed here */
+  });
+
+  conn.on('data', data => {
+    /* data arrives as an OBJECT (PeerJS json serialization) */
+    handleData(data, pid);
+  });
 
   conn.on('close', () => {
-    const g = S.guests.get(peerId);
+    const g = S.guests.get(pid);
     if (g?.approved) {
       const name = g.name;
-      removeParticipant(peerId);
-      broadcastToGuests({ type: 'peer_left', peerId, name });
-      setStatus('connected', 'Connected · ' + S.participants.length + ' online');
+      S.participants = S.participants.filter(p=>p.peerId!==pid);
+      S.guests.delete(pid);
+      broadcast({ type:'peer_out', peerId:pid, name });
+      refreshParticipants();
       sysMsg(`${name} disconnected`);
-      toast(`${name} left`, '');
+      toast(`${name} left`,'');
     } else {
-      S.guests.delete(peerId);
-      // Remove from approval queue if pending
-      S.aqQueue = S.aqQueue.filter(r => r.peerId !== peerId);
-      if (S.aqShowing && S.aqQueue.length === 0 && S.aqWrap.style.display !== 'none') {
-        const showing = D.aqName.textContent;
-        if (showing === '?' || !S.guests.has(peerId)) showNextApproval();
-      }
+      S.guests.delete(pid);
+      /* Remove from AQ if pending */
+      S.aqQueue = S.aqQueue.filter(r=>r.peerId!==pid);
+      if (S.aqActive) showNextAQ();
     }
-    S.typingPeers.delete(peerId);
+    S.typingPeers.forEach(k=>{ if(k.startsWith(pid+':')) S.typingPeers.delete(k); });
     updateTypingUI();
   });
 
-  conn.on('error', err => console.warn('[Conn error]', err));
+  conn.on('error', err => { console.warn('[conn err]', err.message); });
 }
 
-/* Guest connects to host */
-function connectAsGuest(roomId) {
-  const hostPeerId = CFG.PREFIX + roomId;
-  setStatus('connecting', 'Connecting…');
+/* ────────────────────────────────────────
+   20. HOST PEER INIT
+──────────────────────────────────────── */
+function startHost(roomId) {
+  S.roomId = roomId;
+  S.encKey = deriveKey(roomId);
+  S.isHost = true;
 
-  const conn = S.peer.connect(hostPeerId, { reliable: true });
-  S.hostConn = conn;
-
-  const timeout = setTimeout(() => {
-    if (!conn.open) {
-      hideLoad();
-      showError('Connection Timeout', 'Could not reach the host. They may be offline.');
-    }
-  }, CFG.CONNECT_TO);
-
-  conn.on('open', () => {
-    clearTimeout(timeout);
-    // Send join request
-    conn.send(JSON.stringify({ type: 'join_request', name: S.myName, peerId: S.peer.id }));
-    // Show waiting screen
-    hideLoad();
-    D.waitName.textContent = S.myName;
-    showScreen('waiting');
-  });
-
-  conn.on('data', onGuestData);
-
-  conn.on('close', () => {
-    if (document.getElementById('screen-chat').classList.contains('active')) {
-      setStatus('error', 'Disconnected from host');
-      disableChat();
-      sysMsg('Connection to host lost');
-      toast('Disconnected from host.', 'err');
-    }
-  });
-
-  conn.on('error', () => {
-    hideLoad();
-    showError('Connection Failed', 'Could not connect to the host. The room may not exist.');
-  });
-}
-
-/* ──────────────────────────────────────────
-   21. PEER INIT — HOST
-────────────────────────────────────────── */
-function initHost(roomId) {
-  const peerId = CFG.PREFIX + roomId;
+  const peerId = `${CFG.PREFIX}-${roomId}`;
   showLoad('Creating secure room…');
 
-  const peer = new Peer(peerId, { config: { iceServers: CFG.ICE, iceTransportPolicy: 'all' } });
+  const peer = new Peer(peerId, {
+    config: { iceServers:CFG.ICE, iceTransportPolicy:'all' }
+  });
   S.peer = peer;
 
   peer.on('open', id => {
-    S.roomId = roomId;
-    S.encKey = deriveKey(roomId);
-    S.isHost = true;
     S.retryCount = 0;
-    LS.setRole('host');
-    LS.setMyId(id);
+    LS.setRole('host'); LS.setMyId(id);
 
-    // Build own participant entry
-    S.participants = [{ peerId: id, name: S.myName, isHost: true }];
-    buildParticipants();
+    /* Init participant list with self */
+    S.participants = [{ peerId:id, name:S.myName, isHost:true }];
 
-    // Load chat history
-    _msgs = LS.load();
+    /* Load history */
+    _msgs = LS.loadMsgs();
     _msgs.forEach(renderMsg);
 
-    hideLoad();
-    showScreen('chat');
-    enableChat();
-    setStatus('connected', 'Room ready · Waiting for guests');
+    hideLoad(); showScreen('chat');
+    setHostUI();
+    setStatus('ok', 'Room ready — waiting for guests');
     showShareBanner(roomId);
-    D.shareBanner.style.display = 'block';
   });
 
-  peer.on('connection', handleIncomingConnection);
+  peer.on('connection', conn => onIncomingConn(conn));
 
   peer.on('call', call => {
     S.pendingCall = call;
-    S.pendingCallVideo = call.metadata?.videoEnabled !== false;
-    const callerName = peerName(call.peer) || 'Unknown';
-    D.icCallerName.textContent = 'from ' + callerName;
-    D.icType.textContent = S.pendingCallVideo ? 'Video' : 'Voice';
-    D.icOverlay.style.display = 'flex';
+    S.pendingVideo = call.metadata?.video !== false;
+    const callerName = findName(call.peer);
+    D.incFrom.textContent = 'from ' + callerName;
+    D.incType.textContent  = S.pendingVideo ? 'Video' : 'Voice';
+    D.incCall.style.display = 'flex';
     ringBeep();
   });
 
   peer.on('error', err => {
-    if (err.type === 'unavailable-id' && S.retryCount < 5) {
-      S.retryCount++;
-      showLoad(`Reconnecting… (${S.retryCount}/5)`);
-      setTimeout(() => initHost(roomId), 5000);
-    } else if (err.type === 'unavailable-id') {
-      showError('Room Unavailable', 'Could not reclaim this room. Please create a new one.');
+    if (err.type === 'unavailable-id') {
+      /* Peer ID taken — retry up to MAX_RETRIES */
+      if (S.retryCount < CFG.MAX_RETRIES) {
+        S.retryCount++;
+        showLoad(`Reconnecting… (${S.retryCount}/${CFG.MAX_RETRIES})`);
+        S.retryTimer = setTimeout(()=>startHost(roomId), CFG.RETRY_DELAY);
+      } else {
+        showError('Room Unavailable', 'Could not reclaim this room. Please create a new one from home.');
+      }
     } else {
-      console.warn('[Host PeerJS]', err.type, err.message);
+      console.warn('[host peer err]', err.type, err.message);
     }
   });
 
-  peer.on('disconnected', () => {
-    if (!peer.destroyed) setTimeout(() => { try { peer.reconnect(); } catch (_) {} }, 3000);
-  });
+  peer.on('disconnected', ()=>{ if(!peer.destroyed) setTimeout(()=>{ try{peer.reconnect();}catch(_){} },3000); });
 }
 
-/* ──────────────────────────────────────────
-   22. PEER INIT — GUEST
-────────────────────────────────────────── */
-function initGuest(roomId) {
-  // Reuse stored peer ID if available (reconnect stability)
-  let myPeerId = LS.getMyId();
-  if (!myPeerId || myPeerId === CFG.PREFIX + roomId) {
-    myPeerId = CFG.PREFIX + roomId + '-g-' + genId(8);
-    LS.setMyId(myPeerId);
+/* ────────────────────────────────────────
+   21. GUEST PEER INIT
+──────────────────────────────────────── */
+function startGuest(roomId) {
+  S.roomId = roomId;
+  S.encKey = deriveKey(roomId);
+  S.isHost = false;
+
+  /* Stable guest peer ID for reconnect */
+  let myId = LS.getMyId();
+  if (!myId || myId === `${CFG.PREFIX}-${roomId}`) {
+    myId = `${CFG.PREFIX}-${roomId}-g-${genId(8)}`;
+    LS.setMyId(myId);
   }
 
-  showLoad('Connecting…');
+  showLoad('Connecting to room…');
 
-  const peer = new Peer(myPeerId, { config: { iceServers: CFG.ICE, iceTransportPolicy: 'all' } });
+  const peer = new Peer(myId, {
+    config: { iceServers:CFG.ICE, iceTransportPolicy:'all' }
+  });
   S.peer = peer;
 
-  peer.on('open', () => {
-    S.roomId = roomId;
-    S.encKey = deriveKey(roomId);
-    S.isHost = false;
+  peer.on('open', ()=>{
     LS.setRole('guest');
-    connectAsGuest(roomId);
+    connectToHost(roomId);
   });
 
   peer.on('call', call => {
     S.pendingCall = call;
-    S.pendingCallVideo = call.metadata?.videoEnabled !== false;
-    const callerName = peerName(call.peer) || 'Unknown';
-    D.icCallerName.textContent = 'from ' + callerName;
-    D.icType.textContent = S.pendingCallVideo ? 'Video' : 'Voice';
-    D.icOverlay.style.display = 'flex';
+    S.pendingVideo = call.metadata?.video !== false;
+    const callerName = findName(call.peer);
+    D.incFrom.textContent = 'from ' + callerName;
+    D.incType.textContent  = S.pendingVideo ? 'Video' : 'Voice';
+    D.incCall.style.display = 'flex';
     ringBeep();
   });
 
   peer.on('error', err => {
-    hideLoad();
-    if (err.type === 'peer-unavailable') {
-      showError('Host Not Found', 'The room doesn\'t exist or the host went offline.');
-    } else if (err.type === 'unavailable-id') {
-      LS.setMyId('');
-      initGuest(roomId);
+    if (err.type === 'peer-unavailable' || err.type === 'unavailable-id') {
+      /* Host peer ID not found — retry with delay */
+      if (S.retryCount < CFG.MAX_RETRIES) {
+        S.retryCount++;
+        showLoad(`Host not found, retrying… (${S.retryCount}/${CFG.MAX_RETRIES})`);
+        S.retryTimer = setTimeout(()=>{
+          try{ S.peer.destroy(); }catch(_){}
+          startGuest(roomId);
+        }, CFG.RETRY_DELAY);
+      } else {
+        hideLoad();
+        showError('Room Not Found',
+          'Could not connect to the host. The room may not exist, or the host is offline. Try refreshing.');
+      }
     } else {
-      showError('Error', err.message || 'Connection failed.');
+      console.warn('[guest peer err]', err.type, err.message);
     }
   });
 
-  peer.on('disconnected', () => {
-    if (!peer.destroyed) setTimeout(() => { try { peer.reconnect(); } catch (_) {} }, 3000);
+  peer.on('disconnected', ()=>{ if(!peer.destroyed) setTimeout(()=>{ try{peer.reconnect();}catch(_){} },3000); });
+}
+
+function connectToHost(roomId) {
+  const hostId = `${CFG.PREFIX}-${roomId}`;
+  setStatus('wait', 'Connecting…');
+
+  const conn = S.peer.connect(hostId, { reliable:true });
+  S.hostConn = conn;
+
+  /* Timeout if connection never opens */
+  const timeout = setTimeout(()=>{
+    if (!conn.open) {
+      if (S.retryCount < CFG.MAX_RETRIES) {
+        S.retryCount++;
+        showLoad(`Connection slow, retrying… (${S.retryCount}/${CFG.MAX_RETRIES})`);
+        try{ conn.close(); }catch(_){}
+        setTimeout(()=>connectToHost(roomId), 2000);
+      } else {
+        hideLoad();
+        showError('Connection Timeout', 'Could not reach the host. They may be offline.');
+      }
+    }
+  }, CFG.JOIN_TIMEOUT);
+
+  conn.on('open', ()=>{
+    clearTimeout(timeout);
+    S.retryCount = 0; // reset on success
+    /* Send join request */
+    conn.send({ type:'join_req', name:S.myName });
+    /* Show waiting screen */
+    hideLoad();
+    D.waitName.textContent = S.myName;
+    showScreen('wait');
+  });
+
+  conn.on('data', data => {
+    /* data arrives as OBJECT */
+    handleData(data, `${CFG.PREFIX}-${roomId}`);
+  });
+
+  conn.on('close', ()=>{
+    if ($('sc-chat').classList.contains('active')) {
+      setStatus('err', 'Disconnected');
+      disableInput();
+      sysMsg('Connection to host was lost');
+      toast('Disconnected from host.','err');
+    }
+  });
+
+  conn.on('error', err => {
+    clearTimeout(timeout);
+    console.warn('[guest conn err]', err.message);
   });
 }
 
-/* ──────────────────────────────────────────
-   23. CALLS
-────────────────────────────────────────── */
-async function startCallToPeer(targetPeerId, videoEnabled) {
-  if (!S.peer) return;
+/* ────────────────────────────────────────
+   22. AFTER APPROVAL — enter chat room
+──────────────────────────────────────── */
+function onEnteredRoom() {
+  hideLoad();
+  showScreen('chat');
+  setGuestUI();
+  enableInput();
+  refreshParticipants();
+  const cnt = S.participants.length;
+  setStatus('ok', `Connected · ${cnt} online`);
 
+  /* Load history */
+  _msgs = LS.loadMsgs();
+  _msgs.forEach(renderMsg);
+
+  const others = S.participants.filter(p=>!p.isHost).length;
+  sysMsg(`You joined the room · ${cnt} ${cnt===1?'person':'people'} online`);
+  toast('🔒 Secure connection established!','ok');
+  beep(660,.12,.2);
+}
+
+/* ────────────────────────────────────────
+   23. UI SETUP — HOST vs GUEST
+──────────────────────────────────────── */
+function setHostUI() {
+  D.btnDestroy.style.display = 'flex';  /* Host can destroy */
+  D.btnLeave.style.display   = 'none';  /* Host doesn't "leave" */
+  refreshParticipants();
+  enableInput();
+}
+
+function setGuestUI() {
+  D.btnDestroy.style.display = 'none';  /* Guests CANNOT destroy */
+  D.btnLeave.style.display   = 'flex';  /* Guests can leave */
+}
+
+function enableInput() {
+  D.inpMsg.disabled = false;
+  D.btnSend.disabled = false;
+  D.inpMsg.focus();
+}
+function disableInput() {
+  D.inpMsg.disabled = true;
+  D.btnSend.disabled = true;
+}
+
+function showShareBanner(roomId) {
+  const url = `${location.origin}${location.pathname}?room=${roomId}`;
+  D.sbLink.value = url;
+  D.shareBar.style.display = 'flex';
+  if (navigator.share) D.btnShare.style.display = 'flex';
+}
+
+function hideShareBanner() {
+  D.shareBar.style.display = 'none';
+}
+
+/* ────────────────────────────────────────
+   24. CALLS
+──────────────────────────────────────── */
+function findName(pid) {
+  if (pid === S.peer?.id) return S.myName;
+  const p = S.participants.find(x=>x.peerId===pid);
+  return p?.name || S.guests.get(pid)?.name || 'Unknown';
+}
+
+async function startCallTo(targetPid, video) {
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: videoEnabled ? { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } : false
+      audio:true,
+      video:video?{facingMode:'user',width:{ideal:640},height:{ideal:480}}:false
     });
-  } catch { toast('Camera/mic permission denied.', 'err'); return; }
+  } catch { toast('Camera/mic permission denied.','err'); return; }
 
-  S.localStream = stream;
-  S.micOn = true;
-  S.camOn = videoEnabled;
-  D.localVid.srcObject = stream;
-  D.videoArea.style.display = 'block';
+  S.localStream = stream; S.micOn=true; S.camOn=video;
+  D.vidLocal.srcObject = stream;
+  D.vidArea.style.display = 'block';
   updateVidBtns();
 
-  const calleeName = peerName(targetPeerId);
-  D.callPeerInfo.textContent = `Calling ${calleeName}…`;
+  const name = findName(targetPid);
+  D.vidLbl.textContent = `Calling ${name}…`;
 
-  const call = S.peer.call(targetPeerId, stream, {
-    metadata: { videoEnabled, callerName: S.myName }
-  });
-  if (!call) { cleanupCall(); toast('Call failed.', 'err'); return; }
+  const call = S.peer.call(targetPid, stream, { metadata:{ video, callerName:S.myName } });
+  if (!call) { cleanCall(); toast('Call failed.','err'); return; }
   S.activeCall = call;
-  setStatus('calling', 'In call with ' + calleeName);
+  setStatus('call', `In call · ${name}`);
 
-  call.on('stream', remote => {
-    D.remoteVid.srcObject = remote;
-    D.callPeerInfo.textContent = calleeName;
-  });
-  call.on('close', () => { cleanupCall(); sysMsg('Call ended'); });
-  call.on('error', err => { cleanupCall(); toast('Call error: ' + err.message, 'err'); });
+  call.on('stream', remote => { D.vidRemote.srcObject=remote; D.vidLbl.textContent=name; });
+  call.on('close',  ()=>{ cleanCall(); sysMsg('Call ended'); });
+  call.on('error',  err=>{ cleanCall(); toast('Call error: '+err.message,'err'); });
 }
 
 async function acceptCall() {
-  if (!S.pendingCall) return;
-  const call = S.pendingCall;
-  S.pendingCall = null;
-  D.icOverlay.style.display = 'none';
-
-  const videoEnabled = S.pendingCallVideo;
+  const call = S.pendingCall; if(!call) return;
+  S.pendingCall = null; D.incCall.style.display='none';
+  const video = S.pendingVideo;
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: videoEnabled ? { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } : false
+      audio:true,
+      video:video?{facingMode:'user',width:{ideal:640},height:{ideal:480}}:false
     });
-  } catch { toast('Permission denied.', 'err'); call.close(); return; }
+  } catch { toast('Permission denied.','err'); try{call.close();}catch(_){} return; }
 
-  S.localStream = stream;
-  S.micOn = true; S.camOn = videoEnabled;
-  D.localVid.srcObject = stream;
-  D.videoArea.style.display = 'block';
+  S.localStream=stream; S.micOn=true; S.camOn=video;
+  D.vidLocal.srcObject=stream;
+  D.vidArea.style.display='block';
   updateVidBtns();
-
-  const callerName = peerName(call.peer);
-  D.callPeerInfo.textContent = callerName;
   call.answer(stream);
-  S.activeCall = call;
-  setStatus('calling', 'In call with ' + callerName);
-
-  call.on('stream', remote => { D.remoteVid.srcObject = remote; });
-  call.on('close', () => { cleanupCall(); sysMsg('Call ended'); });
-  call.on('error', err => { cleanupCall(); toast('Call error: ' + err.message, 'err'); });
+  S.activeCall=call;
+  const name=findName(call.peer);
+  D.vidLbl.textContent=name;
+  setStatus('call','In call · '+name);
+  call.on('stream', r=>{ D.vidRemote.srcObject=r; });
+  call.on('close',  ()=>{ cleanCall(); sysMsg('Call ended'); });
+  call.on('error',  err=>{ cleanCall(); toast('Call error: '+err.message,'err'); });
 }
 
 function declineCall() {
-  if (S.pendingCall) { try { S.pendingCall.close(); } catch (_) {} S.pendingCall = null; }
-  D.icOverlay.style.display = 'none';
+  if (S.pendingCall) { try{S.pendingCall.close();}catch(_){} S.pendingCall=null; }
+  D.incCall.style.display='none';
 }
 
-function endCall() {
-  if (S.activeCall) { try { S.activeCall.close(); } catch (_) {} }
-  cleanupCall();
-  sysMsg('Call ended');
-}
+function endCall() { if(S.activeCall){try{S.activeCall.close();}catch(_){}} cleanCall(); sysMsg('Call ended'); }
 
-function cleanupCall() {
-  if (S.localStream) { S.localStream.getTracks().forEach(t => t.stop()); S.localStream = null; }
-  if (S.activeCall) { try { S.activeCall.close(); } catch (_) {} S.activeCall = null; }
-  D.remoteVid.srcObject = null;
-  D.localVid.srcObject = null;
-  D.videoArea.style.display = 'none';
-  D.icOverlay.style.display = 'none';
-  S.pendingCall = null;
-  S.micOn = true; S.camOn = true;
-  const cnt = S.participants.length;
-  setStatus('connected', cnt > 0 ? 'Connected · ' + cnt + ' online' : 'Room ready');
+function cleanCall() {
+  if(S.localStream){S.localStream.getTracks().forEach(t=>t.stop());S.localStream=null;}
+  if(S.activeCall){try{S.activeCall.close();}catch(_){}S.activeCall=null;}
+  D.vidRemote.srcObject=null; D.vidLocal.srcObject=null;
+  D.vidArea.style.display='none'; D.incCall.style.display='none';
+  S.pendingCall=null; S.micOn=true; S.camOn=true;
+  const cnt=S.participants.length;
+  setStatus(cnt>0?'ok':'wait', cnt>0?`Connected · ${cnt} online`:'Room ready');
 }
 
 function toggleMic() {
   if (!S.localStream) return;
-  S.micOn = !S.micOn;
-  S.localStream.getAudioTracks().forEach(t => { t.enabled = S.micOn; });
+  S.micOn=!S.micOn;
+  S.localStream.getAudioTracks().forEach(t=>{t.enabled=S.micOn;});
   updateVidBtns();
 }
-
 function toggleCam() {
   if (!S.localStream) return;
-  S.camOn = !S.camOn;
-  S.localStream.getVideoTracks().forEach(t => { t.enabled = S.camOn; });
+  S.camOn=!S.camOn;
+  S.localStream.getVideoTracks().forEach(t=>{t.enabled=S.camOn;});
   updateVidBtns();
 }
-
 function updateVidBtns() {
-  D.btnTogMic.className = 'vbtn ' + (S.micOn ? 'active' : 'muted');
-  D.btnTogMic.innerHTML = `<i class="fas fa-microphone${S.micOn ? '' : '-slash'}"></i>`;
-  D.btnTogCam.className = 'vbtn ' + (S.camOn ? 'active' : 'muted');
-  D.btnTogCam.innerHTML = `<i class="fas fa-video${S.camOn ? '' : '-slash'}"></i>`;
+  D.btnTmic.className='vbtn '+(S.micOn?'on':'off');
+  D.btnTmic.innerHTML=`<i class="fas fa-microphone${S.micOn?'':'-slash'}"></i>`;
+  D.btnTcam.className='vbtn '+(S.camOn?'on':'off');
+  D.btnTcam.innerHTML=`<i class="fas fa-video${S.camOn?'':'-slash'}"></i>`;
 }
 
-/* Header call buttons — open target picker if multiple peers, else call directly */
-function headerCall(videoEnabled) {
-  const others = S.participants.filter(p => p.peerId !== S.peer?.id);
-  if (others.length === 0) { toast('No one to call yet.', 'warn'); return; }
-  if (others.length === 1) { startCallToPeer(others[0].peerId, videoEnabled); return; }
-
-  // Show picker modal
-  D.ctCallTypeLabel.textContent = `Choose who to ${videoEnabled ? 'video' : 'voice'} call:`;
-  D.ctList.innerHTML = '';
-  others.forEach(p => {
-    const div = document.createElement('div');
-    div.className = 'ct-item';
-    div.innerHTML = `<div class="ct-avi">${nameInitial(p.name)}</div><div class="ct-name">${escHtml(p.name)}</div>`;
-    div.onclick = () => {
-      D.modalCallTarget.style.display = 'none';
-      startCallToPeer(p.peerId, videoEnabled);
-    };
-    D.ctList.appendChild(div);
+/* Header call buttons — pick target if multiple participants */
+function headerCall(video) {
+  const others = S.participants.filter(p=>p.peerId!==S.peer?.id);
+  if (others.length === 0) { toast('No one to call yet.','warn'); return; }
+  if (others.length === 1) { startCallTo(others[0].peerId, video); return; }
+  /* Show picker */
+  D.pickSub.textContent = `Choose who to ${video?'video':'voice'} call:`;
+  D.pickList.innerHTML = '';
+  others.forEach(p=>{
+    const d=document.createElement('div'); d.className='pitem-pick';
+    d.innerHTML=`<div class="ppav">${initial(p.name)}</div><div class="ppname">${esc(p.name)}</div>`;
+    d.onclick=()=>{ D.modalPick.style.display='none'; startCallTo(p.peerId,video); };
+    D.pickList.appendChild(d);
   });
-  D.modalCallTarget.style.display = 'flex';
+  D.modalPick.style.display='flex';
 }
 
-/* ──────────────────────────────────────────
-   24. SHARE BANNER
-────────────────────────────────────────── */
-function showShareBanner(roomId) {
-  const url = location.origin + location.pathname + '?room=' + roomId;
-  D.shareInput.value = url;
-  D.shareBanner.style.display = 'block';
-  // Show native share button if available
-  if (navigator.share) D.btnShare.style.display = 'flex';
-}
-
-function copyLink() {
-  const url = D.shareInput.value;
-  navigator.clipboard.writeText(url).then(() => {
-    D.btnCopy.classList.add('copied');
-    D.btnCopy.innerHTML = '<i class="fas fa-check"></i><span>Copied!</span>';
-    setTimeout(() => { D.btnCopy.classList.remove('copied'); D.btnCopy.innerHTML = '<i class="fas fa-copy"></i><span>Copy</span>'; }, 2500);
-    toast('Link copied!', 'ok');
-  }).catch(() => { D.shareInput.select(); document.execCommand('copy'); toast('Copied!', 'ok'); });
-}
-
-/* ──────────────────────────────────────────
-   25. DESTROY / CLEANUP
-────────────────────────────────────────── */
-function cleanupAll() {
-  cleanupCall();
-  S.guests.forEach(g => { try { g.conn.close(); } catch (_) {} });
-  if (S.hostConn) { try { S.hostConn.close(); } catch (_) {} }
-  if (S.peer && !S.peer.destroyed) { try { S.peer.destroy(); } catch (_) {} }
+/* ────────────────────────────────────────
+   25. DESTROY / LEAVE
+──────────────────────────────────────── */
+function cleanAll() {
+  clearTimeout(S.retryTimer);
+  cleanCall();
+  if (S.isHost) {
+    try { broadcast({ type:'room_closed' }); } catch(_) {}
+    S.guests.forEach(g=>{ try{g.conn.close();}catch(_){} });
+  } else {
+    try { S.hostConn?.close(); } catch(_) {}
+  }
+  if (S.peer && !S.peer.destroyed) { try{S.peer.destroy();}catch(_){} }
 }
 
 function destroyRoom() {
-  cleanupAll();
+  cleanAll();
   LS.wipe();
-  window.location.href = location.pathname;
+  location.href = location.pathname;
 }
 
-/* ──────────────────────────────────────────
-   26. UI ENABLE/DISABLE
-────────────────────────────────────────── */
-function enableChat() {
-  D.msgInput.disabled = false;
-  D.btnSend.disabled = false;
-  D.msgInput.focus();
+function leaveRoom() {
+  cleanAll();
+  location.href = location.pathname;
 }
 
-function disableChat() {
-  D.msgInput.disabled = true;
-  D.btnSend.disabled = true;
-  D.btnAudioCall.disabled = true;
-  D.btnVideoCall.disabled = true;
+/* ────────────────────────────────────────
+   26. COPY LINK
+──────────────────────────────────────── */
+function copyLink() {
+  const url = D.sbLink.value;
+  navigator.clipboard.writeText(url).then(()=>{
+    D.btnCopy.classList.add('copied');
+    D.btnCopy.innerHTML='<i class="fas fa-check"></i><span>Copied!</span>';
+    setTimeout(()=>{ D.btnCopy.classList.remove('copied'); D.btnCopy.innerHTML='<i class="fas fa-copy"></i><span>Copy</span>'; },2500);
+    toast('Link copied!','ok');
+  }).catch(()=>{
+    D.sbLink.select(); document.execCommand('copy'); toast('Copied!','ok');
+  });
 }
 
-function autoResize(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
-}
+/* ────────────────────────────────────────
+   27. STARTUP — route host vs guest
+──────────────────────────────────────── */
+function boot() {
+  const params  = new URLSearchParams(location.search);
+  const roomId  = params.get('room');
+  const isHostP = params.get('host') === '1';
 
-/* ──────────────────────────────────────────
-   27. INIT
-────────────────────────────────────────── */
-function init() {
-  const params = new URLSearchParams(location.search);
-  const roomId = params.get('room');
+  /* ── HOST PATH (from "Create Room" navigation) ── */
+  if (roomId && isHostP) {
+    if (!/^[a-z0-9]{8,20}$/.test(roomId)) { showError('Invalid Room','Bad room ID.'); return; }
+    const name = localStorage.getItem('sp2p_name') || 'Host';
+    const approval = localStorage.getItem('sp2p_approval') !== 'false';
+    S.myName = name; S.requireApproval = approval;
+    startHost(roomId);
+    return;
+  }
 
-  if (roomId) {
-    // Validate
-    if (!/^[a-z0-9]{6,20}$/.test(roomId)) {
-      showError('Invalid Link', 'This link is malformed or has expired.');
-      return;
-    }
-    // Guest mode — show join UI
-    D.hostOptions.style.display = 'none';
+  /* ── GUEST PATH (someone shared the link) ── */
+  if (roomId && !isHostP) {
+    if (!/^[a-z0-9]{8,20}$/.test(roomId)) { showError('Invalid Link','This link is malformed or has expired.'); return; }
+    /* Show setup with join UI */
+    D.hostOpts.style.display  = 'none';
     D.btnCreate.style.display = 'none';
-    D.btnJoin.style.display = 'flex';
-    D.joinBanner.style.display = 'flex';
-    D.joinRoomId.textContent = roomId;
-
-    // Auto-fill saved name
-    const savedName = localStorage.getItem('sp2p_name');
-    if (savedName) D.nameInput.value = savedName;
+    D.btnJoin.style.display   = 'flex';
+    D.joinInfo.style.display  = 'flex';
+    D.jiRoomId.textContent    = roomId;
+    const saved = localStorage.getItem('sp2p_name');
+    if (saved) D.inpName.value = saved;
 
     D.btnJoin.onclick = () => {
-      const name = D.nameInput.value.trim();
-      if (!name) { D.nameInput.focus(); toast('Please enter your name.', 'warn'); return; }
+      const name = D.inpName.value.trim();
+      if (!name) { D.inpName.focus(); toast('Please enter your name.','warn'); return; }
       localStorage.setItem('sp2p_name', name);
       S.myName = name;
-      initGuest(roomId);
+      startGuest(roomId);
     };
-  } else {
-    // Host mode — no ?room= in URL
-    D.hostOptions.style.display = 'flex';
-    D.btnCreate.style.display = 'flex';
-    D.btnJoin.style.display = 'none';
-    D.joinBanner.style.display = 'none';
-
-    // Auto-fill saved name
-    const savedName = localStorage.getItem('sp2p_name');
-    if (savedName) D.nameInput.value = savedName;
-
-    D.btnCreate.onclick = () => {
-      const name = D.nameInput.value.trim();
-      if (!name) { D.nameInput.focus(); toast('Please enter your name.', 'warn'); return; }
-      localStorage.setItem('sp2p_name', name);
-      S.myName = name;
-      S.requireApproval = D.approvalToggle.checked;
-      const newRoomId = genId(10);
-      // Navigate to room URL with host flag
-      window.location.href = `${location.pathname}?room=${newRoomId}&host=1`;
-    };
+    return;
   }
+
+  /* ── HOME (no params) — Show host setup ── */
+  D.hostOpts.style.display  = 'flex';
+  D.btnCreate.style.display = 'flex';
+  D.btnJoin.style.display   = 'none';
+  D.joinInfo.style.display  = 'none';
+  const saved = localStorage.getItem('sp2p_name');
+  if (saved) D.inpName.value = saved;
+
+  D.btnCreate.onclick = () => {
+    const name = D.inpName.value.trim();
+    if (!name) { D.inpName.focus(); toast('Please enter your name.','warn'); return; }
+    localStorage.setItem('sp2p_name', name);
+    localStorage.setItem('sp2p_approval', String(D.chkApproval.checked));
+    S.myName = name;
+    const newRoom = genId(10);
+    location.href = `${location.pathname}?room=${newRoom}&host=1`;
+  };
 }
 
-/* ── STARTUP ── */
-(function startup() {
-  const params = new URLSearchParams(location.search);
-  const roomId = params.get('room');
-  const isHostFlag = params.get('host') === '1';
-
-  if (isHostFlag && roomId && /^[a-z0-9]{6,20}$/.test(roomId)) {
-    // Returning/direct host — skip setup screen, go straight to room
-    const savedName = localStorage.getItem('sp2p_name') || 'Host';
-    S.myName = savedName;
-    S.requireApproval = true;
-    initHost(roomId);
-  } else {
-    // Normal init — show setup screen
-    init();
-  }
-})();
-
-/* ──────────────────────────────────────────
+/* ────────────────────────────────────────
    28. EVENT LISTENERS
-────────────────────────────────────────── */
+──────────────────────────────────────── */
 
-// Enter key in name field triggers button
-D.nameInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    const btn = D.btnJoin.style.display !== 'none' ? D.btnJoin : D.btnCreate;
-    if (btn.style.display !== 'none') btn.click();
-  }
+/* Name field — Enter key triggers button */
+$('inp-name').addEventListener('keydown', e=>{
+  if (e.key!=='Enter') return;
+  e.preventDefault();
+  const btn = D.btnJoin.style.display!=='none' ? D.btnJoin : D.btnCreate;
+  btn.click();
 });
 
-// Cancel waiting screen
-D.btnCancelWait.addEventListener('click', () => {
-  if (S.hostConn) { try { S.hostConn.close(); } catch (_) {} }
-  if (S.peer && !S.peer.destroyed) { try { S.peer.destroy(); } catch (_) {} }
-  window.location.href = location.pathname;
+/* Cancel waiting */
+D.btnCancel.addEventListener('click', ()=>{
+  clearTimeout(S.retryTimer);
+  try{S.hostConn?.close();}catch(_){}
+  try{if(!S.peer?.destroyed)S.peer?.destroy();}catch(_){}
+  location.href = location.pathname;
 });
 
-// Approval queue
-D.btnApprove.addEventListener('click', () => processApproval(true));
-D.btnReject.addEventListener('click', () => processApproval(false));
+/* Approval queue */
+D.btnApprove.addEventListener('click', ()=>processAQ(true));
+D.btnReject.addEventListener('click',  ()=>processAQ(false));
 
-// Copy link
+/* Copy link */
 D.btnCopy.addEventListener('click', copyLink);
-
-// Native share
-D.btnShare.addEventListener('click', () => {
-  navigator.share({ title: 'Join my Secure P2P Room', url: D.shareInput.value });
+$('btn-share').addEventListener('click', ()=>{
+  navigator.share?.({ title:'Join SecureP2P Room', url:D.sbLink.value });
 });
 
-// Participants panel
-D.btnParticipants.addEventListener('click', () => {
-  if (D.pPanel.classList.contains('open')) closePanel();
-  else openPanel();
-});
-D.btnClosePanel.addEventListener('click', closePanel);
-D.panelOverlay.addEventListener('click', closePanel);
+/* Participants panel */
+D.btnUsers.addEventListener('click', ()=>{ D.pp.classList.contains('open')?closePanel():openPanel(); });
+D.btnPpClose.addEventListener('click', closePanel);
+D.ppOv.addEventListener('click', closePanel);
 
-// Call buttons (header)
-D.btnAudioCall.addEventListener('click', () => headerCall(false));
-D.btnVideoCall.addEventListener('click', () => headerCall(true));
+/* Call buttons */
+D.btnVcall.addEventListener('click',   ()=>headerCall(false));
+D.btnVidcall.addEventListener('click', ()=>headerCall(true));
 
-// Destroy
-D.btnDestroy.addEventListener('click', () => { D.modalDestroy.style.display = 'flex'; });
-D.mdCancel.addEventListener('click', () => { D.modalDestroy.style.display = 'none'; });
-D.mdConfirm.addEventListener('click', () => { D.modalDestroy.style.display = 'none'; destroyRoom(); });
-D.modalDestroy.addEventListener('click', e => { if (e.target === D.modalDestroy) D.modalDestroy.style.display = 'none'; });
+/* Destroy / Leave */
+D.btnDestroy.addEventListener('click', ()=>{ D.modalDestroy.style.display='flex'; });
+D.btnLeave.addEventListener('click', ()=>{ leaveRoom(); });
+D.mdNo.addEventListener('click',  ()=>{ D.modalDestroy.style.display='none'; });
+D.mdYes.addEventListener('click', ()=>{ D.modalDestroy.style.display='none'; destroyRoom(); });
+D.modalDestroy.addEventListener('click', e=>{ if(e.target===D.modalDestroy) D.modalDestroy.style.display='none'; });
 
-// Call target modal
-D.ctCancel.addEventListener('click', () => { D.modalCallTarget.style.display = 'none'; });
-D.modalCallTarget.addEventListener('click', e => { if (e.target === D.modalCallTarget) D.modalCallTarget.style.display = 'none'; });
+/* Call target modal */
+D.pickCancel.addEventListener('click', ()=>{ D.modalPick.style.display='none'; });
+D.modalPick.addEventListener('click', e=>{ if(e.target===D.modalPick) D.modalPick.style.display='none'; });
 
-// Video controls
-D.btnTogMic.addEventListener('click', toggleMic);
-D.btnTogCam.addEventListener('click', toggleCam);
-D.btnEndCall.addEventListener('click', endCall);
+/* Video controls */
+D.btnTmic.addEventListener('click', toggleMic);
+D.btnTcam.addEventListener('click', toggleCam);
+D.btnEndcall.addEventListener('click', endCall);
 
-// Incoming call
+/* Incoming call */
 D.btnAccept.addEventListener('click', acceptCall);
 D.btnDecline.addEventListener('click', declineCall);
 
-// Send message
-D.btnSend.addEventListener('click', sendTextMessage);
-D.msgInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTextMessage(); }
+/* Send message */
+D.btnSend.addEventListener('click', sendText);
+$('inp-msg').addEventListener('keydown', e=>{
+  if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
 });
-D.msgInput.addEventListener('input', () => {
-  autoResize(D.msgInput);
-  if (!D.msgInput.disabled) onTypingInput();
-});
-
-// File input
-D.fileInput.addEventListener('change', () => {
-  const file = D.fileInput.files[0];
-  if (!file) return;
-  if (!S.peer) { toast('Not connected.', 'err'); return; }
-  sendFileToAll(file);
-  D.fileInput.value = '';
+$('inp-msg').addEventListener('input', ()=>{
+  /* Auto-resize */
+  const el=D.inpMsg; el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px';
+  onTypingInput();
 });
 
-// Prevent double-tap zoom (iOS)
-document.addEventListener('dblclick', e => e.preventDefault(), { passive: false });
+/* File attach */
+$('inp-file').addEventListener('change', ()=>{
+  const file=D.inpFile.files[0]; if(!file) return;
+  if (!S.peer) { toast('Not connected.','err'); return; }
+  sendFile(file);
+  D.inpFile.value='';
+});
+
+/* Lightbox — close on img click */
+$('lb-img').addEventListener('click', e=>e.stopPropagation());
+
+/* Prevent double-tap zoom on iOS */
+document.addEventListener('dblclick', e=>e.preventDefault(), { passive:false });
+
+/* ────────────────────────────────────────
+   START
+──────────────────────────────────────── */
+boot();
